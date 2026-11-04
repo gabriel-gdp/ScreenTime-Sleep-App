@@ -1,0 +1,19 @@
+{
+  "name": "diario-del-sonno",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "PWA personale per sonno e screen time. Questo file serve solo per i test: l'app non ha dipendenze.",
+  "scripts": {
+    "test": "node tests/run-all.mjs",
+    "test:unit": "node tests/run-all.mjs --unit",
+    "test:browser": "node tests/run-all.mjs --browser",
+    "serve": "node tests/serve.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "playwright": "1.63.0"
+  }
+}

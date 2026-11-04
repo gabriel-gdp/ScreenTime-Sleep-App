@@ -2,7 +2,7 @@
 // quando sei online ricevi sempre l'ultima versione pubblicata (niente
 // più versioni vecchie "incastrate" nella cache dopo un aggiornamento),
 // quando sei offline l'app si apre comunque con l'ultima copia salvata.
-const CACHE_NAME = 'sleep-screen-lab-v4';
+const CACHE_NAME = 'sleep-screen-lab-v7';
 const APP_SHELL = [
   './',
   './index.html',
@@ -10,6 +10,8 @@ const APP_SHELL = [
   './js/db.js',
   './js/analytics.js',
   './js/app.js',
+  './js/demo.js',
+  './js/backup.js',
   './manifest.json',
   './icons/icon-192.png',
   './icons/icon-512.png',
@@ -40,10 +42,17 @@ self.addEventListener('fetch', (event) => {
     try {
       // `no-cache`: rivalida con il server invece di usare la cache HTTP
       // del browser (GitHub Pages la tiene fino a 10 minuti).
-      const response = await fetch(event.request.url, { cache: 'no-cache' });
-      if (response.ok) {
-        const cache = await caches.open(CACHE_NAME);
-        cache.put(event.request.url, response.clone());
+      // Per le navigazioni `redirect: 'manual'`: se il server reindirizza
+      // (es. /repo → /repo/), il browser deve ricevere il reindirizzamento
+      // e seguirlo lui; restituire la risposta già reindirizzata a una
+      // navigazione viene rifiutato e la pagina non si apre.
+      const isNav = event.request.mode === 'navigate';
+      const response = await fetch(new Request(event.request.url, {
+        cache: 'no-cache', credentials: 'same-origin', redirect: isNav ? 'manual' : 'follow',
+      }));
+      if (response.ok && response.type === 'basic') {
+        const copy = response.clone();
+        event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.put(event.request.url, copy)).catch(() => {}));
       }
       return response;
     } catch (e) {

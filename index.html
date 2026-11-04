@@ -18,5 +18,25 @@
 <body>
   <div id="app"><p class="muted" style="padding:24px;">Caricamento…</p></div>
   <script type="module" src="js/app.js"></script>
+  <script>
+    // Se un file dell'app manca o non si carica (es. un file non caricato
+    // durante l'aggiornamento), il modulo non parte e resterebbe solo
+    // "Caricamento…". Dopo qualche secondo si mostra cosa fare.
+    setTimeout(function () {
+      if (window.__sslBooted) return;
+      var app = document.getElementById('app');
+      app.innerHTML = '';
+      var box = document.createElement('div');
+      box.setAttribute('role', 'alert');
+      box.style.cssText = 'padding:24px;font-family:-apple-system,sans-serif;line-height:1.5';
+      var p = document.createElement('p');
+      p.textContent = "L'app non si è avviata. I tuoi dati salvati non sono stati toccati. Riprova; se succede di nuovo, controlla che tutti i file dell'app siano stati caricati (index.html, css/, js/, icons/).";
+      var b = document.createElement('button');
+      b.textContent = 'Riprova';
+      b.style.cssText = 'margin-top:12px;min-height:44px;padding:0 18px;font-size:16px';
+      b.onclick = function () { location.reload(); };
+      box.appendChild(p); box.appendChild(b); app.appendChild(box);
+    }, 6000);
+  </script>
 </body>
 </html>
