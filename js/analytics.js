@@ -155,16 +155,23 @@ export function screenTimeTotalWarning(mins) {
   return mins > 960 ? 'Screen time molto elevato (oltre 16 ore): controlla il valore.' : null;
 }
 
+// Etichette di NUMEROSITÀ (§0 della metodologia): dicono su quante notti si
+// basa un valore, non quanto sia "affidabile" o "stabile". Con una sola
+// settimana anche una media su 7 notti può cambiare molto la settimana
+// dopo; per questo non si usano più parole come "confidenza".
 export function dataConfidence(daysWithData, totalDays) {
   const ratio = daysWithData / totalDays;
+  const high = { label: 'Settimana quasi completa', level: 'high' };
+  const mid = { label: 'Settimana parziale', level: 'mid' };
+  const low = { label: 'Troppo poche notti', level: 'low' };
   if (totalDays === 7) {
-    if (daysWithData >= 6) return { label: 'Alta confidenza', level: 'high' };
-    if (daysWithData >= 3) return { label: 'Preliminare', level: 'mid' };
-    return { label: 'Dati insufficienti', level: 'low' };
+    if (daysWithData >= 6) return high;
+    if (daysWithData >= 3) return mid;
+    return low;
   }
-  if (ratio >= 0.8) return { label: 'Alta confidenza', level: 'high' };
-  if (ratio >= 0.33) return { label: 'Preliminare', level: 'mid' };
-  return { label: 'Dati insufficienti', level: 'low' };
+  if (ratio >= 0.8) return high;
+  if (ratio >= 0.33) return mid;
+  return low;
 }
 
 export function dayStatus(entry) {
@@ -173,6 +180,203 @@ export function dayStatus(entry) {
   if (ev && sl) return 'complete';
   if (eveningStarted(entry) || sleepStarted(entry)) return 'partial';
   return 'missing';
+}
+
+// --- Riepilogo di un periodo di notti (ANALYTICS_METHODOLOGY.md §0, §5, §7.2) ---
+// Finestra = le `days` notti che terminano con il risveglio di `endDate`
+// (incluso). Le anomalie confermate sono escluse di default dalle medie
+// (§7.2), ma restano elencate in `excluded` perché l'utente veda cosa è
+// stato escluso e perché; con includeOutliers: true rientrano nel calcolo.
+// L'esclusione è per campo: una notte con orari anomali esclude durata e
+// tempo senza schermo, ma la sua qualità percepita e il suo screen time
+// (se non anomalo) restano nelle medie.
+export const SUMMARY_METRICS = ['durationMin', 'quality', 'screenTimeTotal', 'screenFreeMin'];
+
+export function periodSummary(entries, endDate, days = 7, { includeOutliers = false } = {}) {
+  const dates = [];
+  for (let i = days - 1; i >= 0; i--) dates.push(addDays(endDate, -i));
+  const values = Object.fromEntries(SUMMARY_METRICS.map((k) => [k, []]));
+  const excluded = [];
+  const nights = [];
+  let nightsWithData = 0;
+
+  dates.forEach((date) => {
+    const e = entries[date];
+    const status = dayStatus(e);
+    if (status !== 'missing') nightsWithData++;
+    const m = computeNightMetrics(e, date);
+    const night = {
+      date, status,
+      durationMin: m.durationMin,
+      quality: e && e.quality != null ? e.quality : null,
+      screenTimeTotal: e && !isEmpty(e.screenTimeTotal) ? e.screenTimeTotal : null,
+      screenFreeMin: m.screenFreeMin,
+      sleepOutlier: !!(e && e.is_outlier_bedtime),
+      screenOutlier: !!(e && e.is_outlier_screen_time),
+    };
+    nights.push(night);
+    const skip = { durationMin: night.sleepOutlier, screenFreeMin: night.sleepOutlier, screenTimeTotal: night.screenOutlier, quality: false };
+    const skippedFields = [];
+    SUMMARY_METRICS.forEach((k) => {
+      if (night[k] == null) return;
+      if (skip[k] && !includeOutliers) { skippedFields.push(k); return; }
+      values[k].push(night[k]);
+    });
+    if (skippedFields.length) excluded.push({ date, fields: skippedFields });
+  });
+
+  // Due misure diverse, da non confondere:
+  // - coverage (sotto): quante notti della finestra hanno almeno un dato;
+  // - stats[k].confidence: affidabilità di QUELLA media, dalle notti
+  //   effettivamente usate (senza mancanti e anomalie escluse). Con 6/7
+  //   notti compilate ma 2 sole qualità, la qualità media è "Dati
+  //   insufficienti" anche se la copertura è alta.
+  const stats = Object.fromEntries(SUMMARY_METRICS.map((k) => {
+    const v = values[k];
+    return [k, {
+      n: v.length,
+      mean: v.length ? v.reduce((a, b) => a + b, 0) / v.length : null,
+      // Valori estremi della settimana: rendono visibile quanto variano le
+      // singole notti attorno alla media, senza formule aggiuntive.
+      min: v.length ? Math.min(...v) : null,
+      max: v.length ? Math.max(...v) : null,
+      confidence: dataConfidence(v.length, days),
+    }];
+  }));
+
+  // Notte migliore/peggiore per qualità percepita: solo con almeno 3 notti
+  // valutate e qualità non tutte uguali (altrimenti non c'è nulla da
+  // distinguere). A parità, vince la più recente.
+  const rated = nights.filter((n) => n.quality != null);
+  let best = null, worst = null;
+  if (rated.length >= 3) {
+    const maxQ = Math.max(...rated.map((n) => n.quality));
+    const minQ = Math.min(...rated.map((n) => n.quality));
+    if (maxQ > minQ) {
+      best = [...rated].reverse().find((n) => n.quality === maxQ);
+      worst = [...rated].reverse().find((n) => n.quality === minQ);
+    }
+  }
+
+  return { dates, days, nights, nightsWithData, coverage: dataConfidence(nightsWithData, days), stats, excluded, best, worst };
+}
+
+// Confronto tra le ultime 7 notti e le 7 precedenti. La differenza viene
+// calcolata solo se entrambe le finestre hanno almeno MIN_N_FOR_DELTA
+// valori per quella metrica: con 1–2 notti per parte un "+40 min" sarebbe
+// rumore presentato come cambiamento.
+export const MIN_N_FOR_DELTA = 3;
+
+export function weeklyComparison(entries, endDate, opts = {}) {
+  const current = periodSummary(entries, endDate, 7, opts);
+  const previous = periodSummary(entries, addDays(endDate, -7), 7, opts);
+  const deltas = Object.fromEntries(SUMMARY_METRICS.map((k) => {
+    const c = current.stats[k], p = previous.stats[k];
+    const ok = c.n >= MIN_N_FOR_DELTA && p.n >= MIN_N_FOR_DELTA;
+    return [k, ok ? c.mean - p.mean : null];
+  }));
+  return { current, previous, deltas };
+}
+
+// --- Notti pronte per le analisi, con la stessa politica anomalie del
+// riepilogo settimanale (§7.2): esclusione di default, per campo. Una notte
+// con orari anomali non entra in durata, tempo senza schermo e regolarità;
+// uno screen time anomalo non entra nelle analisi sullo screen time; la
+// qualità percepita resta sempre (non è mai un'anomalia).
+export function analysisNights(entries, { includeOutliers = false } = {}) {
+  return Object.keys(entries).sort().map((date) => {
+    const e = entries[date] || {};
+    const m = computeNightMetrics(e, date);
+    const sleepOut = !includeOutliers && !!e.is_outlier_bedtime;
+    const screenOut = !includeOutliers && !!e.is_outlier_screen_time;
+    return {
+      date,
+      quality: e.quality != null ? e.quality : null,
+      durationMin: sleepOut ? null : m.durationMin,
+      screenFreeMin: sleepOut ? null : m.screenFreeMin,
+      screenTimeTotal: screenOut || isEmpty(e.screenTimeTotal) ? null : e.screenTimeTotal,
+      bedtime: sleepOut ? null : (e.bedtime || null),
+      wakeTime: sleepOut ? null : (e.wakeTime || null),
+      excludedSleep: sleepOut,
+      excludedScreen: screenOut,
+    };
+  });
+}
+
+// Regolarità su una finestra di CALENDARIO (le notti con risveglio negli
+// ultimi `days` giorni, oggi incluso), non sulle ultime N notti registrate:
+// con dati radi, "ultime 28 notti" poteva mescolare notti lontane mesi.
+export const CONSISTENCY_MIN_NIGHTS = 5;
+export function consistencyForWindow(nights, endDate, days = 28) {
+  const start = addDays(endDate, -(days - 1));
+  const inWindow = nights.filter((n) => n.date >= start && n.date <= endDate);
+  const usable = inWindow.filter((n) => n.bedtime && n.wakeTime);
+  const excluded = inWindow.filter((n) => n.excludedSleep).length;
+  if (usable.length < CONSISTENCY_MIN_NIGHTS) return { shown: false, n: usable.length, excluded, days };
+  return {
+    shown: true, n: usable.length, excluded, days,
+    score: consistencyScore(usable.map((n) => n.bedtime), usable.map((n) => n.wakeTime)),
+  };
+}
+
+// Associazioni (§6). `direction` dice se a valori più alti della prima
+// variabile corrispondono in media valori più alti (+) o più bassi (−)
+// della seconda: senza, l'etichetta "Segnale moderato" non si interpreta.
+export const CORRELATION_PAIRS = [
+  { x: 'screenTimeTotal', y: 'durationMin' },
+  { x: 'screenTimeTotal', y: 'quality' },
+  { x: 'screenFreeMin', y: 'durationMin' },
+  { x: 'screenFreeMin', y: 'quality' },
+];
+// Per le coppie NON mostrate, `reason` dice perché: 'n' (meno di 14 notti),
+// 'variance' (una delle due variabili non varia mai), 'weak' (|r| < 0,2:
+// nessuna associazione LINEARE rilevabile, che non esclude altri tipi di
+// relazione). `from`/`to`: periodo delle notti usate.
+export function correlationResults(nights) {
+  return CORRELATION_PAIRS.map(({ x, y }) => {
+    const used = nights.filter((n) => n[x] != null && n[y] != null);
+    const pairs = used.map((n) => [n[x], n[y]]);
+    const r = pearsonR(pairs);
+    const sig = correlationSignal(pairs.length, r);
+    let reason = null;
+    if (!sig.shown) reason = pairs.length < 14 ? 'n' : r == null ? 'variance' : 'weak';
+    return {
+      x, y, ...sig, reason,
+      direction: sig.shown ? (sig.r > 0 ? 'positive' : 'negative') : null,
+      from: used.length ? used[0].date : null,
+      to: used.length ? used[used.length - 1].date : null,
+    };
+  });
+}
+
+// Notti migliori (§8). Soglia = 75° percentile della qualità personale
+// (rango più vicino) E almeno 7/10; le notti a pari merito con la soglia
+// entrano TUTTE nel gruppo, così il risultato non dipende dall'ordine dei
+// dati. Minimo 8 notti per gruppo — anche per "le altre" e per ciascuna
+// metrica confrontata: con 2–3 valori per parte Cohen's d sarebbe rumore.
+export const OPTIMAL_MIN_TOTAL = 30;
+export const OPTIMAL_MIN_GROUP = 8;
+export function optimalZone(nights) {
+  const rated = nights.filter((n) => n.quality != null);
+  if (rated.length < OPTIMAL_MIN_TOTAL) return { shown: false, reason: 'total', n: rated.length };
+  const asc = rated.map((n) => n.quality).sort((a, b) => a - b);
+  const p75 = asc[Math.ceil(0.75 * asc.length) - 1];
+  const threshold = Math.max(p75, 7);
+  const best = rated.filter((n) => n.quality >= threshold);
+  const rest = rated.filter((n) => n.quality < threshold);
+  const base = { n: rated.length, threshold, bestN: best.length, restN: rest.length };
+  if (best.length < OPTIMAL_MIN_GROUP) return { shown: false, reason: 'best', ...base };
+  if (rest.length < OPTIMAL_MIN_GROUP) return { shown: false, reason: 'rest', ...base };
+  const results = ['durationMin', 'screenFreeMin', 'screenTimeTotal'].map((key) => {
+    const g1 = best.map((n) => n[key]).filter((v) => v != null);
+    const g2 = rest.map((n) => n[key]).filter((v) => v != null);
+    if (g1.length < OPTIMAL_MIN_GROUP || g2.length < OPTIMAL_MIN_GROUP) return { key, shown: false, reason: 'n', n1: g1.length, n2: g2.length };
+    const res = cohensD(g1, g2);
+    if (!res) return { key, shown: false, reason: 'variance', n1: g1.length, n2: g2.length };
+    const signalLabel = effectLabel(Math.abs(res.d));
+    return { key, shown: !!signalLabel, reason: signalLabel ? null : 'small', signalLabel, m1: res.m1, m2: res.m2, d: res.d, n1: g1.length, n2: g2.length };
+  });
+  return { shown: true, ...base, results };
 }
 
 export function daysInMonth(year, month) { return new Date(year, month + 1, 0).getDate(); }

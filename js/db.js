@@ -6,6 +6,10 @@ const DB_NAME = 'sleep-screen-lab';
 // v2: un record = una notte intera (vedi commento in analytics.js).
 const DB_VERSION = 2;
 const STORE = 'entries';
+// Versione dello schema dei record, scritta nei backup JSON: un backup
+// creato con uno schema precedente viene migrato con le stesse funzioni
+// usate dall'aggiornamento del database.
+export const SCHEMA_VERSION = DB_VERSION;
 
 // Campi che nella v1 venivano salvati nel record del giorno in cui si
 // compilava il check-in serale, ma che descrivono la notte che termina il
@@ -21,22 +25,36 @@ function nextDay(dateStr) {
 
 function isEmpty(v) { return v === '' || v == null; }
 
+// Trasformazione pura v1 → v2 (nessun accesso al database): usata sia
+// dall'aggiornamento di IndexedDB sia dall'importazione di backup v1.
+export function migrateRecordsV1toV2(records) {
+  const next = {};
+  const target = (date) => (next[date] = next[date] || { date });
+  records.forEach((old) => {
+    Object.keys(old).forEach((k) => {
+      if (k === 'date' || isEmpty(old[k])) return;
+      const date = EVENING_FIELDS.includes(k) ? nextDay(old.date) : old.date;
+      target(date)[k] = old[k];
+    });
+  });
+  return Object.values(next);
+}
+
+// Porta un elenco di record dallo schema `fromVersion` a quello attuale.
+export function migrateRecords(records, fromVersion) {
+  let out = records;
+  if (fromVersion < 2) out = migrateRecordsV1toV2(out);
+  return out;
+}
+
 // Eseguita dentro la transazione di upgrade: se qualcosa fallisce, l'intero
 // upgrade viene annullato e i dati v1 restano intatti.
 function migrateV1toV2(store) {
   const req = store.getAll();
   req.onsuccess = () => {
-    const next = {};
-    const target = (date) => (next[date] = next[date] || { date });
-    req.result.forEach((old) => {
-      Object.keys(old).forEach((k) => {
-        if (k === 'date' || isEmpty(old[k])) return;
-        const date = EVENING_FIELDS.includes(k) ? nextDay(old.date) : old.date;
-        target(date)[k] = old[k];
-      });
-    });
+    const next = migrateRecordsV1toV2(req.result);
     store.clear();
-    Object.values(next).forEach((r) => store.put(r));
+    next.forEach((r) => store.put(r));
   };
 }
 
@@ -87,10 +105,18 @@ async function write(op) {
     const db = await openDB();
     return await new Promise((resolve, reject) => {
       const tx = db.transaction(STORE, 'readwrite');
-      op(tx.objectStore(STORE));
       tx.oncomplete = () => resolve(true);
       tx.onerror = () => reject(tx.error);
-      tx.onabort = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error || new Error('Transazione annullata'));
+      try {
+        op(tx.objectStore(STORE));
+      } catch (e) {
+        // Senza abort le scritture già inviate in questa transazione
+        // verrebbero comunque salvate: con più record (importazione) si
+        // otterrebbe un risultato a metà.
+        try { tx.abort(); } catch (_) { /* già chiusa */ }
+        reject(e);
+      }
     });
   } catch (e) {
     console.error('Errore scrittura IndexedDB', e);
@@ -101,6 +127,13 @@ async function write(op) {
 // Ritornano true solo a transazione completata con successo.
 export function saveEntry(entry) { return write((store) => store.put(entry)); }
 export function deleteEntry(date) { return write((store) => store.delete(date)); }
+
+// Importazione da backup: TUTTI i record in un'unica transazione. Se anche
+// una sola scrittura fallisce la transazione viene annullata e il database
+// resta esattamente com'era prima (nessuna importazione a metà).
+export function importEntries(records) {
+  return write((store) => { records.forEach((r) => store.put(r)); });
+}
 
 // Preferenze semplici (tema, ultimo promemoria mostrato) — localStorage è
 // sufficiente qui: piccoli valori scalari, nessun bisogno di query.
