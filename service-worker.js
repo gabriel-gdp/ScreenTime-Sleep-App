@@ -2,7 +2,7 @@
 // quando sei online ricevi sempre l'ultima versione pubblicata (niente
 // più versioni vecchie "incastrate" nella cache dopo un aggiornamento),
 // quando sei offline l'app si apre comunque con l'ultima copia salvata.
-const CACHE_NAME = 'sleep-screen-lab-v7';
+const CACHE_NAME = 'sleep-screen-lab-v8';
 const APP_SHELL = [
   './',
   './index.html',
@@ -16,6 +16,8 @@ const APP_SHELL = [
   './icons/icon-192.png',
   './icons/icon-512.png',
   './icons/icon-512-maskable.png',
+  './icons/apple-touch-icon.png',
+  './icons/favicon-32.png',
 ];
 
 self.addEventListener('install', (event) => {

@@ -14,7 +14,7 @@ js/db.js                 layer di storage (IndexedDB + localStorage per le prefe
 js/app.js                stato dell'app e rendering dell'interfaccia
 js/demo.js               dati di esempio per la modalità demo (solo in memoria)
 js/backup.js             backup completo in JSON e ripristino validato
-icons/                   icone PWA (192, 512, 512 maskable)
+icons/                   icone (180 per iOS, 192, 512, 512 maskable, favicon) e sorgente icon.svg
 docs/                    ANALYTICS_METHODOLOGY.md (formule e soglie), DATA_MODEL.md (schema, CSV, backup),
                          MANUAL_TEST_CHECKLIST.md (verifiche da fare su iPhone)
 tests/                   test automatici — vedi tests/README.md (non servono per usare l'app)
