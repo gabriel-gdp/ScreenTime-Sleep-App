@@ -63,6 +63,23 @@ export function nearestClockDiff(fromHHMM, toHHMM) {
   return d > 720 ? d - 1440 : d;
 }
 
+// Come nearestClockDiff, ma sul tempo REALE: tra le occorrenze di timeStr
+// nel giorno di referenceInstant e in quelli adiacenti sceglie la più
+// vicina (a parità, quella precedente). Serve quando l'istante di
+// riferimento è noto: nelle notti del cambio d'ora l'intervallo reale
+// differisce di un'ora da quello letto sulle lancette (29/03/2026:
+// 01:50 → 03:10 = 20 minuti reali; 25/10/2026: 140 minuti reali).
+export function nearestInstant(referenceInstant, timeStr) {
+  const day = todayISO(referenceInstant);
+  let best = null;
+  for (const delta of [-1, 0, 1]) {
+    const c = combineDateTime(addDays(day, delta), timeStr, false);
+    const dist = Math.abs(c - referenceInstant);
+    if (!best || dist < best.dist || (dist === best.dist && c < best.c)) best = { c, dist };
+  }
+  return best.c;
+}
+
 export function minutesBetween(a, b) { return Math.round((b - a) / 60000); }
 
 export function formatDuration(mins) {
@@ -91,6 +108,15 @@ export function formatDayLabel(dateStr) {
 
 function isEmpty(v) { return v === '' || v == null; }
 
+// Risvegli notturni: `awakenings` (numero) e `awakeMinutes` (minuti svegli
+// in totale, escluso il risveglio finale). Due interi presenti insieme:
+// 0/0 = nessun risveglio dichiarato; assenti = informazione non raccolta
+// (notti precedenti alla funzione o senza compilazione del mattino). Una
+// notte "non raccolta" non vale mai come zero.
+export function awakeningsKnown(e) {
+  return !!e && Number.isInteger(e.awakenings) && Number.isInteger(e.awakeMinutes) && e.awakenings >= 0 && e.awakeMinutes >= 0;
+}
+
 export function eveningComplete(e) { return !!e && !isEmpty(e.screenTimeTotal) && !isEmpty(e.lastScreenUse); }
 export function sleepComplete(e) { return !!e && !isEmpty(e.bedtime) && !isEmpty(e.wakeTime) && e.quality != null; }
 export function eveningStarted(e) { return !!e && (!isEmpty(e.screenTimeTotal) || !isEmpty(e.lastScreenUse)); }
@@ -107,11 +133,15 @@ export function computeNightMetrics(entry, date) {
   const result = {
     durationMin: null, durationError: null, durationWarning: null,
     screenFreeMin: null, screenFreeError: null, screenFreeWarning: null,
+    // Intervallo di sonno (durationMin) e sonno effettivo stimato restano
+    // distinti: il secondo esiste solo se i risvegli sono stati indicati.
+    effectiveSleepMin: null, effectiveError: null,
   };
 
+  let bedInstant = null;
   if (e.bedtime && e.wakeTime) {
     const wakeInstant = combineDateTime(date, e.wakeTime, false);
-    const bedInstant = resolveBefore(wakeInstant, e.bedtime);
+    bedInstant = resolveBefore(wakeInstant, e.bedtime);
     const dur = minutesBetween(bedInstant, wakeInstant);
     if (dur <= 0) {
       result.durationError = "L'orario di risveglio deve essere successivo a quello in cui ti sei addormentato/a.";
@@ -122,7 +152,12 @@ export function computeNightMetrics(entry, date) {
   }
 
   if (e.bedtime && e.lastScreenUse) {
-    const diff = nearestClockDiff(e.lastScreenUse, e.bedtime);
+    // Con il risveglio noto l'addormentamento ha una data precisa e il
+    // confronto avviene sul tempo reale (corretto anche al cambio d'ora);
+    // senza, si confrontano le lancette sull'istante più vicino.
+    const diff = bedInstant
+      ? minutesBetween(nearestInstant(bedInstant, e.lastScreenUse), bedInstant)
+      : nearestClockDiff(e.lastScreenUse, e.bedtime);
     if (diff < 0) {
       result.screenFreeError = `L'ultimo utilizzo dello schermo (${e.lastScreenUse}) non può essere dopo l'orario in cui ti sei addormentato/a (${e.bedtime}). Correggi uno dei due orari.`;
     } else {
@@ -130,6 +165,12 @@ export function computeNightMetrics(entry, date) {
       if (diff === 0) result.screenFreeWarning = "Zero minuti senza schermo: hai smesso di usarlo proprio quando ti sei addormentato/a? Se sì, va bene così.";
       else if (diff > 360) result.screenFreeWarning = 'Più di 6 ore senza schermo prima di dormire: controlla gli orari.';
     }
+  }
+
+  if (result.durationMin != null && awakeningsKnown(e)) {
+    const eff = result.durationMin - e.awakeMinutes;
+    if (eff <= 0) result.effectiveError = `I minuti svegli (${e.awakeMinutes}) non possono essere pari o superiori all'intervallo di sonno (${formatDuration(result.durationMin)}).`;
+    else result.effectiveSleepMin = eff;
   }
 
   return result;
@@ -190,7 +231,7 @@ export function dayStatus(entry) {
 // L'esclusione è per campo: una notte con orari anomali esclude durata e
 // tempo senza schermo, ma la sua qualità percepita e il suo screen time
 // (se non anomalo) restano nelle medie.
-export const SUMMARY_METRICS = ['durationMin', 'quality', 'screenTimeTotal', 'screenFreeMin'];
+export const SUMMARY_METRICS = ['durationMin', 'effectiveSleepMin', 'quality', 'awakenings', 'awakeMinutes', 'screenTimeTotal', 'screenFreeMin'];
 
 export function periodSummary(entries, endDate, days = 7, { includeOutliers = false } = {}) {
   const dates = [];
@@ -211,11 +252,17 @@ export function periodSummary(entries, endDate, days = 7, { includeOutliers = fa
       quality: e && e.quality != null ? e.quality : null,
       screenTimeTotal: e && !isEmpty(e.screenTimeTotal) ? e.screenTimeTotal : null,
       screenFreeMin: m.screenFreeMin,
+      effectiveSleepMin: m.effectiveSleepMin,
+      awakenings: awakeningsKnown(e) ? e.awakenings : null,
+      awakeMinutes: awakeningsKnown(e) ? e.awakeMinutes : null,
       sleepOutlier: !!(e && e.is_outlier_bedtime),
       screenOutlier: !!(e && e.is_outlier_screen_time),
     };
     nights.push(night);
-    const skip = { durationMin: night.sleepOutlier, screenFreeMin: night.sleepOutlier, screenTimeTotal: night.screenOutlier, quality: false };
+    // Il numero e i minuti dei risvegli non dipendono dagli orari: restano
+    // anche nelle notti con orari anomali; il sonno effettivo, che dipende
+    // dall'intervallo, segue invece la sorte della durata.
+    const skip = { durationMin: night.sleepOutlier, effectiveSleepMin: night.sleepOutlier, screenFreeMin: night.sleepOutlier, screenTimeTotal: night.screenOutlier, quality: false, awakenings: false, awakeMinutes: false };
     const skippedFields = [];
     SUMMARY_METRICS.forEach((k) => {
       if (night[k] == null) return;
@@ -295,6 +342,9 @@ export function analysisNights(entries, { includeOutliers = false } = {}) {
       durationMin: sleepOut ? null : m.durationMin,
       screenFreeMin: sleepOut ? null : m.screenFreeMin,
       screenTimeTotal: screenOut || isEmpty(e.screenTimeTotal) ? null : e.screenTimeTotal,
+      effectiveSleepMin: sleepOut ? null : m.effectiveSleepMin,
+      awakenings: awakeningsKnown(e) ? e.awakenings : null,
+      awakeMinutes: awakeningsKnown(e) ? e.awakeMinutes : null,
       bedtime: sleepOut ? null : (e.bedtime || null),
       wakeTime: sleepOut ? null : (e.wakeTime || null),
       excludedSleep: sleepOut,
@@ -327,6 +377,13 @@ export const CORRELATION_PAIRS = [
   { x: 'screenTimeTotal', y: 'quality' },
   { x: 'screenFreeMin', y: 'durationMin' },
   { x: 'screenFreeMin', y: 'quality' },
+  // Risvegli (solo notti in cui sono stati indicati). Coppie scelte per non
+  // essere legate per costruzione: "minuti svegli e sonno effettivo"
+  // sarebbe negativa per definizione e non è inclusa.
+  { x: 'awakenings', y: 'quality' },
+  { x: 'awakeMinutes', y: 'quality' },
+  { x: 'awakenings', y: 'durationMin' },
+  { x: 'effectiveSleepMin', y: 'quality' },
 ];
 // Per le coppie NON mostrate, `reason` dice perché: 'n' (meno di 14 notti),
 // 'variance' (una delle due variabili non varia mai), 'weak' (|r| < 0,2:
@@ -367,7 +424,7 @@ export function optimalZone(nights) {
   const base = { n: rated.length, threshold, bestN: best.length, restN: rest.length };
   if (best.length < OPTIMAL_MIN_GROUP) return { shown: false, reason: 'best', ...base };
   if (rest.length < OPTIMAL_MIN_GROUP) return { shown: false, reason: 'rest', ...base };
-  const results = ['durationMin', 'screenFreeMin', 'screenTimeTotal'].map((key) => {
+  const results = ['durationMin', 'effectiveSleepMin', 'awakeMinutes', 'screenFreeMin', 'screenTimeTotal'].map((key) => {
     const g1 = best.map((n) => n[key]).filter((v) => v != null);
     const g2 = rest.map((n) => n[key]).filter((v) => v != null);
     if (g1.length < OPTIMAL_MIN_GROUP || g2.length < OPTIMAL_MIN_GROUP) return { key, shown: false, reason: 'n', n1: g1.length, n2: g2.length };
@@ -397,6 +454,8 @@ export function buildCSV(entries) {
     'sleep_duration_minutes', 'screen_free_before_bed_minutes',
     'is_outlier_bedtime', 'outlier_acknowledged_bedtime',
     'is_outlier_screen_time', 'outlier_acknowledged_screen_time',
+    // Aggiunte nello schema 3, in coda per non spostare le colonne esistenti.
+    'awakenings', 'awake_minutes', 'estimated_sleep_minutes',
   ];
   const val = (v) => (v == null ? '' : v);
   const flag = (v) => (v ? 'true' : 'false');
@@ -410,6 +469,7 @@ export function buildCSV(entries) {
       val(m.durationMin), val(m.screenFreeMin),
       flag(e.is_outlier_bedtime), flag(e.outlier_acknowledged_bedtime),
       flag(e.is_outlier_screen_time), flag(e.outlier_acknowledged_screen_time),
+      awakeningsKnown(e) ? e.awakenings : '', awakeningsKnown(e) ? e.awakeMinutes : '', val(m.effectiveSleepMin),
     ].join(',');
   });
   return [header.join(','), ...rows].join('\n');

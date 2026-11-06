@@ -16,13 +16,12 @@
 // - la scrittura avviene in un'unica transazione (db.js: importEntries):
 //   se fallisce, il database resta com'era.
 import { computeNightMetrics } from './analytics.js';
+import { DATA_FIELDS, FLAG_FIELDS, SLEEP_FIELDS, AWAKENINGS_MAX, AWAKE_MINUTES_MAX } from './record.js';
 
 export const BACKUP_FORMAT = 'diario-del-sonno-backup';
 export const BACKUP_FORMAT_VERSION = 1;
 export const MAX_BACKUP_BYTES = 5 * 1024 * 1024; // un anno di notti occupa ~100 KB
 
-const DATA_FIELDS = ['screenTimeTotal', 'lastScreenUse', 'bedtime', 'wakeTime', 'quality'];
-const FLAG_FIELDS = ['is_outlier_bedtime', 'outlier_acknowledged_bedtime', 'is_outlier_screen_time', 'outlier_acknowledged_screen_time'];
 const ALLOWED = new Set(['date', ...DATA_FIELDS, ...FLAG_FIELDS]);
 const pad = (n) => String(n).padStart(2, '0');
 
@@ -61,6 +60,16 @@ export function recordError(r) {
   for (const f of ['lastScreenUse', 'bedtime', 'wakeTime']) if (f in r && !isTime(r[f])) return `${r.date}: orario non valido in ${f}`;
   if ('quality' in r && !(Number.isInteger(r.quality) && r.quality >= 1 && r.quality <= 10)) return `${r.date}: qualità non valida`;
   for (const f of FLAG_FIELDS) if (f in r && typeof r[f] !== 'boolean') return `${r.date}: ${f} non è vero/falso`;
+  // Risvegli: entrambi presenti o entrambi assenti; 0 ↔ 0; con almeno un
+  // risveglio, almeno un minuto; solo insieme a dati del mattino.
+  const hasA = 'awakenings' in r, hasM = 'awakeMinutes' in r;
+  if (hasA !== hasM) return `${r.date}: numero e minuti dei risvegli devono essere presenti insieme`;
+  if (hasA) {
+    if (!(Number.isInteger(r.awakenings) && r.awakenings >= 0 && r.awakenings <= AWAKENINGS_MAX)) return `${r.date}: numero di risvegli non valido`;
+    if (!(Number.isInteger(r.awakeMinutes) && r.awakeMinutes >= 0 && r.awakeMinutes <= AWAKE_MINUTES_MAX)) return `${r.date}: minuti svegli non validi`;
+    if ((r.awakenings === 0) !== (r.awakeMinutes === 0)) return `${r.date}: numero e minuti dei risvegli incoerenti`;
+    if (!SLEEP_FIELDS.some((f) => f in r)) return `${r.date}: risvegli indicati senza dati del mattino`;
+  }
   if (!DATA_FIELDS.some((f) => f in r)) return `${r.date}: nessun dato`;
   return null;
 }
@@ -72,7 +81,7 @@ export function recordError(r) {
 // segnalate nel riepilogo, e il diario le mostra con l'errore da correggere.
 export function recordIncoherent(r) {
   const m = computeNightMetrics(r, r.date);
-  return !!(m.durationError || m.screenFreeError);
+  return !!(m.durationError || m.screenFreeError || m.effectiveError);
 }
 
 // Legge e valida un file di backup. `migrate(records, fromVersion)` porta

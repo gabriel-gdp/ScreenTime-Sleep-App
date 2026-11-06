@@ -5,7 +5,8 @@
 // Generati in modo deterministico (stesso seme → stessi dati), così una
 // sessione demo è ripetibile. Contengono di proposito: una relazione
 // positiva tra tempo senza schermo e qualità, weekend più tardivi, qualche
-// notte mancante o parziale e due anomalie confermate, per mostrare come il
+// notte mancante o parziale, risvegli notturni (assenti nelle notti più
+// vecchie, come per i dati storici) e due anomalie confermate, per mostrare come il
 // tool le tratta. Non rappresentano dati reali di nessuno.
 import { addDays, pad, sleepComplete } from './analytics.js';
 
@@ -23,6 +24,8 @@ const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
 export function generateDemoEntries(today, nights = 60, seed = 20261103) {
   const rand = mulberry32(seed);
+  // Flusso separato per i risvegli: non cambia gli altri valori della demo.
+  const randAw = mulberry32(seed + 1);
   const gauss = () => (rand() + rand() + rand() - 1.5) * 1.15; // ≈ N(0,1), limitata
   const entries = {};
 
@@ -49,7 +52,14 @@ export function generateDemoEntries(today, nights = 60, seed = 20261103) {
       is_outlier_bedtime: false, outlier_acknowledged_bedtime: false,
       is_outlier_screen_time: false, outlier_acknowledged_screen_time: false,
     };
-    if (r > 0.95) { delete e.bedtime; delete e.wakeTime; delete e.quality; } // solo sera
+    // Risvegli: le notti più vecchie (prime 15) restano senza l'informazione,
+    // come le notti registrate prima di questa funzione; nelle altre i
+    // risvegli sono più frequenti nelle notti di qualità bassa.
+    if (i < nights - 15) {
+      e.awakenings = clamp(Math.round((7.5 - quality) * 0.7 + (randAw() - 0.5) * 1.6), 0, 5);
+      e.awakeMinutes = e.awakenings ? clamp(Math.round(e.awakenings * (6 + randAw() * 14)), 3, 120) : 0;
+    } else randAw();
+    if (r > 0.95) { delete e.bedtime; delete e.wakeTime; delete e.quality; delete e.awakenings; delete e.awakeMinutes; } // solo sera
     else if (r > 0.92) { delete e.screenTimeTotal; delete e.lastScreenUse; } // solo mattina
     entries[date] = e;
   }
@@ -70,6 +80,6 @@ export function generateDemoEntries(today, nights = 60, seed = 20261103) {
 
   // La notte appena trascorsa resta da completare, per provare l'inserimento.
   const last = entries[today];
-  if (last && sleepComplete(last)) { delete last.bedtime; delete last.wakeTime; delete last.quality; }
+  if (last && sleepComplete(last)) { delete last.bedtime; delete last.wakeTime; delete last.quality; delete last.awakenings; delete last.awakeMinutes; }
   return entries;
 }

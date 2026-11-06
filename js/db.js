@@ -4,7 +4,10 @@
 
 const DB_NAME = 'sleep-screen-lab';
 // v2: un record = una notte intera (vedi commento in analytics.js).
-const DB_VERSION = 2;
+// v3: campi facoltativi dei risvegli notturni (awakenings, awakeMinutes).
+//     Nessuna trasformazione dei record: le notti già salvate restano con
+//     i risvegli "non indicati" (mai zero assegnato d'ufficio).
+const DB_VERSION = 3;
 const STORE = 'entries';
 // Versione dello schema dei record, scritta nei backup JSON: un backup
 // creato con uno schema precedente viene migrato con le stesse funzioni
@@ -44,6 +47,8 @@ export function migrateRecordsV1toV2(records) {
 export function migrateRecords(records, fromVersion) {
   let out = records;
   if (fromVersion < 2) out = migrateRecordsV1toV2(out);
+  // v2 → v3: identità. I record v2 non hanno informazioni sui risvegli e
+  // devono restare così (dato sconosciuto, non "zero risvegli").
   return out;
 }
 

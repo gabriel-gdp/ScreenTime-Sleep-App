@@ -10,6 +10,10 @@ import {
   eveningComplete, sleepComplete, eveningStarted, sleepStarted, weeklyComparison, MIN_N_FOR_DELTA,
 } from './analytics.js';
 import { generateDemoEntries } from './demo.js';
+import {
+  EMPTY_DRAFT, draftFromRecord, draftToRecord, sameData, hasData, parseIntInput,
+  awakeningsDraftError, awakeningsUnknownHistoric, AWAKENINGS_MAX, AWAKE_MINUTES_MAX,
+} from './record.js';
 
 const svg = (inner, extra = '') => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" ${extra}>${inner}</svg>`;
 const ICONS = {
@@ -30,11 +34,9 @@ const ICONS = {
   upload: svg('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>'),
 };
 
-// Campi che l'utente compila per una notte (vedi modello in analytics.js).
-const FIELDS = ['screenTimeTotal', 'lastScreenUse', 'bedtime', 'wakeTime', 'quality'];
-const EMPTY_DRAFT = { screenTimeTotal: '', lastScreenUse: '', bedtime: '', wakeTime: '', quality: null };
+// Il record di una notte (campi, bozze, regole dei risvegli) è definito in
+// record.js, condiviso con il backup.
 const isEmpty = (v) => v === '' || v == null;
-const same = (a, b) => (isEmpty(a) && isEmpty(b)) || a === b;
 const capitalize = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 
 const state = {
@@ -115,6 +117,9 @@ function restoreDrafts() {
     if (typeof d.screenTimeTotal === 'number' && d.screenTimeTotal >= 0 && d.screenTimeTotal < 1440) draft.screenTimeTotal = d.screenTimeTotal;
     ['lastScreenUse', 'bedtime', 'wakeTime'].forEach((f) => { if (typeof d[f] === 'string' && /^\d{2}:\d{2}$/.test(d[f])) draft[f] = d[f]; });
     if (Number.isInteger(d.quality) && d.quality >= 1 && d.quality <= 10) draft.quality = d.quality;
+    if (d.awakeningsOn === true || d.awakeningsOn === false || d.awakeningsOn === null) draft.awakeningsOn = d.awakeningsOn;
+    if (Number.isInteger(d.awakenings) && d.awakenings >= 1 && d.awakenings <= AWAKENINGS_MAX) draft.awakenings = d.awakenings;
+    if (Number.isInteger(d.awakeMinutes) && d.awakeMinutes >= 1 && d.awakeMinutes <= AWAKE_MINUTES_MAX) draft.awakeMinutes = d.awakeMinutes;
     state.drafts[date] = draft;
   });
   persistDrafts(); // ripulisce le bozze che nel frattempo coincidono con i dati salvati
@@ -186,37 +191,39 @@ function defaultNight() {
 
 // ---------- Bozze ----------
 function draftFor(date) {
-  if (!state.drafts[date]) {
-    const saved = state.entries[date] || {};
-    const d = { ...EMPTY_DRAFT };
-    FIELDS.forEach((f) => { if (!isEmpty(saved[f])) d[f] = saved[f]; });
-    state.drafts[date] = d;
-  }
+  if (!state.drafts[date]) state.drafts[date] = draftFromRecord(state.entries[date]);
   return state.drafts[date];
 }
+// Il record che si salverebbe ora: è anche quello usato per i calcoli
+// mostrati a schermo, così anteprima e dato salvato coincidono.
+const draftRecord = (date) => draftToRecord(draftFor(date), state.entries[date], date);
 // L'utente ha svuotato tutti i campi di una notte già salvata: salvare
 // significa eliminarla, e va detto esplicitamente (e confermato).
 function isDeletion(date) {
-  const d = state.drafts[date];
-  return !!d && !!state.entries[date] && FIELDS.every((f) => isEmpty(d[f]));
+  return !!state.drafts[date] && !!state.entries[date] && !hasData(draftRecord(date));
 }
 function isDirty(date) {
-  const d = state.drafts[date];
-  if (!d) return false;
-  const saved = state.entries[date] || {};
-  return FIELDS.some((f) => !same(d[f], saved[f]));
+  if (!state.drafts[date]) return false;
+  return !sameData(draftRecord(date), state.entries[date]);
 }
 
 function validate(date) {
   const d = draftFor(date);
-  const m = computeNightMetrics(d, date);
+  const record = draftRecord(date);
+  let m = computeNightMetrics(record, date);
   const bedW = bedtimeRangeWarning(d.bedtime);
   const wakeW = wakeTimeRangeWarning(d.wakeTime);
   const screenW = screenTimeTotalWarning(d.screenTimeTotal);
-  const errors = [m.durationError, m.screenFreeError].filter(Boolean);
+  // Risvegli: obbligatori e validati solo con la casella selezionata; se
+  // mancano o non sono validi il salvataggio è bloccato.
+  const awErr = date > todayISO() ? null : awakeningsDraftError(d);
+  // Con i risvegli non validi il sonno effettivo non ha senso: si mostra
+  // solo l'errore dei risvegli, non un secondo messaggio derivato.
+  if (awErr) m = { ...m, effectiveSleepMin: null, effectiveError: null };
+  const errors = [m.durationError, m.screenFreeError, m.effectiveError, awErr && awErr.text].filter(Boolean);
   const sleepWarnings = [m.durationWarning, m.screenFreeWarning, bedW, wakeW].filter(Boolean);
   const screenWarnings = [screenW].filter(Boolean);
-  return { d, m, bedW, wakeW, screenW, errors, sleepWarnings, screenWarnings, warnings: [...screenWarnings, ...sleepWarnings] };
+  return { d, record, m, awErr, bedW, wakeW, screenW, errors, sleepWarnings, screenWarnings, warnings: [...screenWarnings, ...sleepWarnings] };
 }
 
 // ---------- Etichette ----------
@@ -382,6 +389,60 @@ function timeRow({ id, label, help, value, kind = 'clock', extra = '' }) {
     <div class="row-msg" id="${id}-msg"></div>`;
 }
 
+// ---------- Risvegli notturni (vedi record.js per le regole) ----------
+function awakeningsHTML(d, date) {
+  const on = d.awakeningsOn === true;
+  const historic = d.awakeningsOn === null && awakeningsUnknownHistoric(state.entries[date]);
+  return `
+    <div class="row aw-row">
+      <label class="aw-check" for="aw-on">
+        <input type="checkbox" id="aw-on" ${on ? 'checked' : ''} aria-controls="aw-fields" aria-expanded="${on}">
+        <span>Ho avuto risvegli durante la notte</span>
+      </label>
+    </div>
+    ${historic ? `<div class="row-note" id="aw-historic"><p class="muted small">Per questa notte i risvegli non sono stati registrati: restano "non indicati", a meno che tu non li indichi.</p><button type="button" class="link-btn" id="aw-none">Segna: nessun risveglio</button></div>` : ''}
+    <div id="aw-fields" ${on ? '' : 'hidden'}>
+      <div class="row">
+        <label class="row-label" for="aw-count">Numero di risvegli</label>
+        <div class="row-control stepper">
+          <button type="button" class="btn-chip step" id="aw-dec" aria-label="Un risveglio in meno">−</button>
+          <input type="text" inputmode="numeric" pattern="[0-9]*" class="num-input" id="aw-count" value="${on ? d.awakenings : ''}" autocomplete="off">
+          <button type="button" class="btn-chip step" id="aw-inc" aria-label="Un risveglio in più">+</button>
+        </div>
+      </div>
+      <div class="row">
+        <label class="row-label" for="aw-minutes">Minuti svegli in totale<span class="row-help">Somma approssimativa dei periodi svegli dopo il primo addormentamento, escluso il risveglio finale</span></label>
+        <div class="row-control"><input type="text" inputmode="numeric" pattern="[0-9]*" class="num-input" id="aw-minutes" value="${on ? d.awakeMinutes : ''}" placeholder="min" autocomplete="off"><span class="unit" aria-hidden="true">min</span></div>
+      </div>
+    </div>
+    <div class="row-msg" id="aw-msg"></div>`;
+}
+
+function attachAwakeningsListeners(d) {
+  const $ = (id) => document.getElementById(id);
+  const box = $('aw-on');
+  if (!box) return; // notte futura: nessun mattino da compilare
+  box.addEventListener('change', () => {
+    d.awakeningsOn = box.checked;
+    if (box.checked && !(Number.isInteger(d.awakenings) && d.awakenings >= 1)) d.awakenings = 1;
+    onDraftEdit();
+    renderToday(); // mostra o nasconde i campi; il focus resta sulla casella
+  });
+  const none = $('aw-none');
+  if (none) none.addEventListener('click', () => { d.awakeningsOn = false; onDraftEdit(); renderToday(); restoreFocus('#aw-on'); });
+  const count = $('aw-count'), minutes = $('aw-minutes');
+  if (count) count.addEventListener('input', () => { d.awakenings = parseIntInput(count.value); onDraftEdit(); });
+  if (minutes) minutes.addEventListener('input', () => { d.awakeMinutes = parseIntInput(minutes.value); onDraftEdit(); });
+  const step = (delta) => {
+    const cur = Number.isInteger(d.awakenings) ? d.awakenings : 1;
+    d.awakenings = Math.min(AWAKENINGS_MAX, Math.max(1, cur + delta));
+    count.value = d.awakenings;
+    onDraftEdit();
+  };
+  if ($('aw-dec')) $('aw-dec').addEventListener('click', () => step(-1));
+  if ($('aw-inc')) $('aw-inc').addEventListener('click', () => step(1));
+}
+
 function renderToday() {
   const key = focusKey();
   const date = state.selectedDate;
@@ -403,11 +464,12 @@ function renderToday() {
     <section class="card" aria-labelledby="evening-title">
       <div class="card-head">
         <span class="card-icon">${ICONS.smartphone}</span>
-        <div class="card-titles"><h3 id="evening-title">Prima di dormire</h3><p>${capitalize(dayLong(start))}, sera</p></div>
+        <div class="card-titles"><h3 id="evening-title">Prima di dormire</h3><p>Sera di ${dayLong(start)}, anche dopo mezzanotte</p></div>
         <span class="part-status" id="evening-status"></span>
       </div>
-      ${timeRow({ id: 'f-screentime', label: 'Screen time della giornata', help: 'Ore e minuti, come in Tempo di utilizzo', value: d.screenTimeTotal, kind: 'duration' })}
-      ${timeRow({ id: 'f-lastuse', label: 'Ultimo utilizzo dello schermo', help: 'Prima di addormentarti', value: d.lastScreenUse,
+      ${timeRow({ id: 'f-screentime', label: `Screen time di ${dayLong(start)}`, help: `Totale del giorno di calendario ${dayLong(start)} ${monthLong(start)}, in ore e minuti`, value: d.screenTimeTotal, kind: 'duration' })}
+      ${t > start && (t === date || isEmpty(d.screenTimeTotal)) ? `<div class="row-note">${msgHTML(`${t === date ? 'È già passata la mezzanotte' : `Stai compilando una sera passata`}: in Tempo di utilizzo seleziona <strong>${dayLong(start)}</strong>, non ${t === date ? 'oggi' : 'il giorno attuale'}. Il totale di un giorno non include l'uso dopo la sua mezzanotte.`, 'info')}</div>` : ''}
+      ${timeRow({ id: 'f-lastuse', label: 'Ultimo utilizzo prima di addormentarti', help: 'Anche dopo mezzanotte, es. 00:30', value: d.lastScreenUse,
     extra: showNow ? '<button type="button" class="btn-chip" id="lastuse-now" aria-label="Imposta l\'ultimo utilizzo all\'ora attuale">Adesso</button>' : '' })}
     </section>
 
@@ -420,6 +482,7 @@ function renderToday() {
       ${future ? `<p class="placeholder">${ICONS.moon}<span>Questa parte si compila domani mattina, quando ti svegli.</span></p>` : `
         ${timeRow({ id: 'f-bedtime', label: 'Ti sei addormentato/a alle', value: d.bedtime })}
         ${timeRow({ id: 'f-waketime', label: 'Ti sei svegliato/a alle', value: d.wakeTime })}
+        ${awakeningsHTML(d, date)}
         <div class="quality-block">
           <p class="quality-label" id="quality-label">Qualità percepita del sonno</p>
           <div class="quality-grid" role="radiogroup" aria-labelledby="quality-label">
@@ -465,11 +528,16 @@ function summaryHTML(v) {
       <p class="value serif">${value}</p>
       ${hint ? `<p class="hint-small">${hint}</p>` : ''}
     </div>`;
-  const durationHint = m.durationMin == null && !m.durationError ? 'Con addormentamento e risveglio' : '';
+  const durationHint = m.durationMin == null && !m.durationError ? 'Con addormentamento e risveglio' : 'Dall\'addormentamento al risveglio finale';
   const freeHint = m.screenFreeMin == null && !m.screenFreeError ? 'Con ultimo utilizzo e addormentamento' : '';
+  const r = v.record;
+  const effHint = m.effectiveSleepMin != null
+    ? (r.awakeMinutes ? `Intervallo meno ${r.awakeMinutes} min svegli` : 'Nessun risveglio indicato')
+    : v.awErr ? 'Completa i risvegli' : m.durationMin == null ? 'Con intervallo e risvegli' : !Number.isInteger(r.awakenings) ? 'Risvegli non indicati per questa notte' : '';
   const msgs = [
     m.durationError && msgHTML(m.durationError, 'error', 'err-duration'),
     m.screenFreeError && msgHTML(m.screenFreeError, 'error', 'err-screenfree'),
+    m.effectiveError && msgHTML(m.effectiveError, 'error', 'err-effective'),
     m.durationWarning && msgHTML(m.durationWarning, 'warn', 'warn-duration'),
     m.screenFreeWarning && msgHTML(m.screenFreeWarning, 'warn', 'warn-screenfree'),
   ].filter(Boolean);
@@ -480,7 +548,8 @@ function summaryHTML(v) {
   }
   return `
     <div class="stat-grid">
-      ${stat('Durata del sonno', formatDuration(m.durationMin), durationHint)}
+      ${stat('Intervallo di sonno', formatDuration(m.durationMin), durationHint)}
+      ${stat('Sonno effettivo stimato', formatDuration(m.effectiveSleepMin), effHint)}
       ${stat('Senza schermo prima di dormire', formatDuration(m.screenFreeMin), freeHint)}
     </div>
     ${msgs.join('')}`;
@@ -503,6 +572,15 @@ function updateTodayDerived() {
   setMsg('#f-screentime-msg', v.screenW, 'warn');
   setMsg('#f-bedtime-msg', v.bedW, 'warn');
   setMsg('#f-waketime-msg', v.wakeW, 'warn');
+  setMsg('#aw-msg', v.awErr && v.awErr.text, v.awErr && v.awErr.missing ? 'info' : 'error');
+  ['aw-count', 'aw-minutes'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const bad = !!(v.awErr && !v.awErr.missing) || !!(m.effectiveError && id === 'aw-minutes');
+    if (bad) el.setAttribute('aria-invalid', 'true'); else el.removeAttribute('aria-invalid');
+    if (v.awErr || m.effectiveError) el.setAttribute('aria-describedby', m.effectiveError && id === 'aw-minutes' ? 'aw-msg err-effective' : 'aw-msg');
+    else el.removeAttribute('aria-describedby');
+  });
 
   const invalid = {
     'f-lastuse': !!m.screenFreeError,
@@ -571,7 +649,7 @@ function updateTodayDerived() {
   btn.className = 'btn-primary';
   let off = false;
   if (state.saving) { btn.textContent = 'Salvataggio…'; off = true; }
-  else if (v.errors.length) { btn.textContent = 'Correggi gli orari per salvare'; off = true; }
+  else if (v.errors.length) { btn.textContent = v.awErr && !m.durationError && !m.screenFreeError ? (v.awErr.missing ? 'Completa i risvegli per salvare' : 'Correggi i risvegli per salvare') : 'Correggi i dati per salvare'; off = true; }
   else if (!dirty) {
     if (saved) { btn.innerHTML = `${ICONS.check}<span>Salvato</span>`; btn.classList.add('is-saved'); }
     else btn.textContent = 'Salva';
@@ -645,6 +723,7 @@ function attachTodayListeners() {
     root.querySelector(`.quality-btn[data-q="${n}"]`).focus();
   });
 
+  attachAwakeningsListeners(d);
   document.getElementById('save-btn').addEventListener('click', onSave);
 
   const dismissBtn = document.getElementById('dismiss-reminder');
@@ -674,10 +753,9 @@ async function onSave() {
 
   // Si salva esattamente ciò che è visibile a schermo; i campi vuoti
   // restano assenti (mai convertiti in 0 o stimati).
-  const record = { date };
-  FIELDS.forEach((f) => { if (!isEmpty(v.d[f])) record[f] = v.d[f]; });
-  const hasData = FIELDS.some((f) => record[f] !== undefined);
-  if (hasData) {
+  const record = { ...v.record };
+  const withData = hasData(record);
+  if (withData) {
     record.is_outlier_bedtime = v.sleepWarnings.length > 0;
     record.outlier_acknowledged_bedtime = record.is_outlier_bedtime;
     record.is_outlier_screen_time = v.screenWarnings.length > 0;
@@ -687,7 +765,7 @@ async function onSave() {
   state.saving = true;
   updateTodayDerived();
   // In demo le modifiche restano in memoria: il database reale non si tocca.
-  const ok = state.demo ? true : hasData ? await saveEntry(record) : await deleteEntry(date);
+  const ok = state.demo ? true : withData ? await saveEntry(record) : await deleteEntry(date);
   state.saving = false;
   // Se il salvataggio fallisce, la conferma già data resta valida: il
   // tentativo successivo salva direttamente, senza chiederla di nuovo.
@@ -695,13 +773,13 @@ async function onSave() {
 
   if (ok) {
     const next = { ...state.entries };
-    if (hasData) next[date] = record; else delete next[date];
+    if (withData) next[date] = record; else delete next[date];
     state.entries = next;
     delete state.drafts[date];
     persistDrafts();
     state.saveMsg = state.demo
       ? { type: 'ok', text: 'Salvato solo nella demo (non sul dispositivo).' }
-      : { type: 'ok', text: hasData ? 'Salvato sul dispositivo.' : 'Dati della notte eliminati.' };
+      : { type: 'ok', text: withData ? 'Salvato sul dispositivo.' : 'Dati della notte eliminati.' };
   } else {
     state.saveMsg = { type: 'error', text: 'Salvataggio non riuscito: i dati inseriti sono ancora qui, riprova.' };
   }
@@ -720,7 +798,9 @@ const shortRange = (dates) => {
 const nightShort = (date) => `${weekdayShort(addDays(date, -1))}–${weekdayShort(date)} ${dayNum(addDays(date, -1))}→${dayNum(date)}`;
 
 const METRIC_UI = {
-  durationMin: { label: 'Durata media', fmt: (v) => formatDuration(Math.round(v)), range: (v) => formatDuration(v), delta: (d) => signedDuration(d) },
+  durationMin: { label: 'Intervallo di sonno medio', fmt: (v) => formatDuration(Math.round(v)), range: (v) => formatDuration(v), delta: (d) => signedDuration(d) },
+  effectiveSleepMin: { label: 'Sonno effettivo stimato', fmt: (v) => formatDuration(Math.round(v)), range: (v) => formatDuration(v), delta: (d) => signedDuration(d) },
+  awakenings: { label: 'Risvegli per notte', fmt: (v) => v.toFixed(1), range: (v) => String(v), delta: (d) => (Math.abs(d) < 0.05 ? null : `${d > 0 ? '+' : '−'}${Math.abs(d).toFixed(1)}`) },
   quality: { label: 'Qualità media', fmt: (v) => `${v.toFixed(1)}<small>/10</small>`, range: (v) => String(v), delta: (d) => (Math.abs(d) < 0.05 ? null : `${d > 0 ? '+' : '−'}${Math.abs(d).toFixed(1)}`) },
   screenTimeTotal: { label: 'Screen time medio', fmt: (v) => formatDuration(Math.round(v)), range: (v) => formatDuration(v), delta: (d) => signedDuration(d) },
   screenFreeMin: { label: 'Senza schermo prima di dormire', fmt: (v) => formatDuration(Math.round(v)), range: (v) => formatDuration(v), delta: (d) => signedDuration(d) },
@@ -730,7 +810,7 @@ function signedDuration(d) {
   if (r === 0) return null;
   return `${r > 0 ? '+' : '−'}${formatDuration(Math.abs(r))}`;
 }
-const FIELD_WORD = { durationMin: 'durata', screenFreeMin: 'tempo senza schermo', screenTimeTotal: 'screen time' };
+const FIELD_WORD = { durationMin: 'intervallo di sonno', effectiveSleepMin: 'sonno effettivo stimato', screenFreeMin: 'tempo senza schermo', screenTimeTotal: 'screen time' };
 
 function metricTile(key, cur, delta) {
   const ui = METRIC_UI[key];
@@ -750,6 +830,7 @@ function metricTile(key, cur, delta) {
       <p class="value serif">${s.mean == null ? '—' : ui.fmt(s.mean)}</p>
       <p class="n">${s.n === 0 ? 'Nessun dato' : `su ${s.n} ${s.n === 1 ? 'notte' : 'notti'}`}</p>
       ${s.n >= 2 ? `<p class="n">tra ${ui.range(s.min)} e ${ui.range(s.max)}</p>` : ''}
+      ${key === 'awakenings' && s.n > 0 && cur.stats.awakeMinutes.mean != null ? `<p class="n">≈ ${formatDuration(Math.round(cur.stats.awakeMinutes.mean))} svegli per notte</p>` : ''}
       ${s.n === 0 ? '' : `<span class="conf conf-${s.confidence.level}">${s.confidence.label}</span>`}
       ${deltaLine}
     </div>`;
@@ -758,23 +839,25 @@ function metricTile(key, cur, delta) {
 function barsHTML(summary) {
   const durs = summary.nights.map((n) => (summary.excluded.some((x) => x.date === n.date && x.fields.includes('durationMin')) ? null : n.durationMin));
   const maxH = Math.max(600, ...durs.filter((v) => v != null));
-  const desc = summary.nights.map((n) => `${nightShort(n.date)}: ${n.durationMin != null ? formatDuration(n.durationMin) : 'nessun dato'}${n.quality != null ? `, qualità ${n.quality}` : ''}`).join('; ');
+  const desc = summary.nights.map((n) => `${nightShort(n.date)}: ${n.durationMin != null ? formatDuration(n.durationMin) : 'nessun dato'}${n.awakeMinutes > 0 ? `, di cui ${formatDuration(n.awakeMinutes)} svegli` : ''}${n.quality != null ? `, qualità ${n.quality}` : ''}`).join('; ');
   return `
     <div class="bars" role="img" aria-label="Notte per notte. ${desc}">
       ${summary.nights.map((n, i) => {
     const dur = n.durationMin;
     const isOut = durs[i] == null && dur != null;
     const h = dur != null ? Math.max(6, Math.round((dur / maxH) * 100)) : 0;
+    // Parte superiore della barra: minuti svegli, solo se indicati.
+    const awakePct = dur != null && n.awakeMinutes > 0 ? Math.min(100, Math.round((n.awakeMinutes / dur) * 100)) : 0;
     return `
         <div class="bar-col">
           <span class="bar-value">${dur != null ? `${Math.floor(dur / 60)}h${pad(dur % 60)}` : ''}</span>
-          <div class="bar-track">${dur != null ? `<div class="bar ${isOut ? 'is-outlier' : ''}" style="height:${h}%"></div>` : '<div class="bar-empty"></div>'}</div>
+          <div class="bar-track">${dur != null ? `<div class="bar ${isOut ? 'is-outlier' : ''}" style="height:${h}%">${awakePct ? `<div class="bar-awake" style="height:${Math.max(4, awakePct)}%"></div>` : ''}</div>` : '<div class="bar-empty"></div>'}</div>
           <span class="bar-q ${n.quality == null ? 'is-empty' : ''}">${n.quality != null ? n.quality : '·'}</span>
           <span class="bar-day">${weekdayShort(n.date)}</span>
         </div>`;
   }).join('')}
     </div>
-    <div class="bars-legend"><span><span class="key key-bar"></span>Durata del sonno</span><span><span class="key key-q">7</span>Qualità</span>${summary.excluded.length ? '<span><span class="key key-out"></span>Anomalia</span>' : ''}</div>`;
+    <div class="bars-legend"><span><span class="key key-bar"></span>Intervallo di sonno</span>${summary.nights.some((n) => n.awakeMinutes > 0) ? '<span><span class="key key-awake"></span>Minuti svegli</span>' : ''}<span><span class="key key-q">7</span>Qualità</span>${summary.excluded.length ? '<span><span class="key key-out"></span>Anomalia</span>' : ''}</div>`;
 }
 
 function weeklyHTML() {
@@ -816,8 +899,8 @@ function weeklyHTML() {
         <span class="badge ${cur.coverage.level}" title="Notti con almeno un dato">Copertura ${cur.nightsWithData}/7</span>
       </div>
       ${anyData ? `
-        <div class="metric-grid">${['durationMin', 'quality', 'screenTimeTotal', 'screenFreeMin'].map((k) => metricTile(k, cur, deltas[k])).join('')}</div>
-        <p class="compare-note"><strong>Come leggere questi numeri.</strong> La copertura conta le notti con almeno un dato; ogni media dice su quante notti è calcolata e tra quali valori variano. Le etichette descrivono quante notti ci sono (6–7 = settimana quasi completa, 3–5 = parziale), non quanto il risultato sia stabile: con una sola settimana, una media può cambiare molto la settimana dopo, e differenze di pochi minuti o di qualche decimo rientrano spesso nella normale variazione da una notte all'altra. Confronto con le 7 notti precedenti (${shortRange(prev.dates)}, copertura ${prev.nightsWithData}/7): descrive cosa è cambiato, non perché.</p>
+        <div class="metric-grid">${['durationMin', 'effectiveSleepMin', 'quality', 'awakenings', 'screenTimeTotal', 'screenFreeMin'].map((k) => metricTile(k, cur, deltas[k])).join('')}</div>
+        <p class="compare-note"><strong>Come leggere questi numeri.</strong> La copertura conta le notti con almeno un dato; ogni media dice su quante notti è calcolata e tra quali valori variano: medie con un numero di notti diverso non descrivono le stesse notti. Risvegli e sonno effettivo stimato contano solo le notti in cui i risvegli sono indicati; il sonno effettivo stimato è l'intervallo di sonno meno i minuti svegli. Le etichette descrivono quante notti ci sono (6–7 = settimana quasi completa, 3–5 = parziale), non quanto il risultato sia stabile: con una sola settimana, una media può cambiare molto la settimana dopo, e differenze di pochi minuti o di qualche decimo rientrano spesso nella normale variazione da una notte all'altra. Confronto con le 7 notti precedenti (${shortRange(prev.dates)}, copertura ${prev.nightsWithData}/7): descrive cosa è cambiato, non perché.</p>
         ${bestWorst}
         ${outlierNote}
         <div class="card card-pad chart-block">
@@ -827,10 +910,19 @@ function weeklyHTML() {
     </section>`;
 }
 
-const VAR_NAME = { screenTimeTotal: 'screen time della giornata', screenFreeMin: 'tempo senza schermo prima di dormire', durationMin: 'durata del sonno', quality: 'qualità del sonno' };
-const MORE_X = { screenTimeTotal: 'a uno screen time più alto', screenFreeMin: 'a più tempo senza schermo' };
-const Y_DIR = { durationMin: ['una durata più lunga', 'una durata più breve'], quality: ['una qualità più alta', 'una qualità più bassa'] };
-const OZ_LABEL = { durationMin: 'Durata del sonno', screenFreeMin: 'Tempo senza schermo prima di dormire', screenTimeTotal: 'Screen time della giornata' };
+const VAR_NAME = {
+  screenTimeTotal: 'screen time della giornata', screenFreeMin: 'tempo senza schermo prima di dormire', durationMin: 'intervallo di sonno', quality: 'qualità del sonno',
+  awakenings: 'numero di risvegli', awakeMinutes: 'minuti svegli durante la notte', effectiveSleepMin: 'sonno effettivo stimato',
+};
+const MORE_X = {
+  screenTimeTotal: 'a uno screen time più alto', screenFreeMin: 'a più tempo senza schermo',
+  awakenings: 'a più risvegli', awakeMinutes: 'a più minuti svegli', effectiveSleepMin: 'a più sonno effettivo stimato',
+};
+const Y_DIR = { durationMin: ['un intervallo di sonno più lungo', 'un intervallo di sonno più breve'], quality: ['una qualità più alta', 'una qualità più bassa'] };
+// Coppie che usano i risvegli: il campione è più piccolo (solo notti con i
+// risvegli indicati) e molte notti hanno 0 risvegli.
+const AWAKENING_KEYS = ['awakenings', 'awakeMinutes', 'effectiveSleepMin'];
+const OZ_LABEL = { durationMin: 'Intervallo di sonno', effectiveSleepMin: 'Sonno effettivo stimato', awakeMinutes: 'Minuti svegli durante la notte', screenFreeMin: 'Tempo senza schermo prima di dormire', screenTimeTotal: 'Screen time della giornata' };
 
 // Coppie non mostrate, con il motivo: senza questa riga l'assenza di una
 // coppia poteva essere letta come "nessun legame" (§6 della metodologia).
@@ -859,7 +951,7 @@ function renderTrend() {
 
   const consistency = consistencyForWindow(nights, t, 28);
   const correlations = correlationResults(nights);
-  const excludedForPair = (c) => allNights.filter((n) => (n.excludedSleep && ['durationMin', 'screenFreeMin'].some((k) => k === c.x || k === c.y)) || (n.excludedScreen && c.x === 'screenTimeTotal')).length;
+  const excludedForPair = (c) => allNights.filter((n) => (n.excludedSleep && ['durationMin', 'effectiveSleepMin', 'screenFreeMin'].some((k) => k === c.x || k === c.y)) || (n.excludedScreen && c.x === 'screenTimeTotal')).length;
   const nightsExcludedAny = nights.filter((n) => n.excludedSleep || n.excludedScreen).length;
   const oz = optimalZone(nights);
 
@@ -876,7 +968,7 @@ function renderTrend() {
       ${lastNightFilled ? `
       <div class="hero-row">
         <div><span class="serif hero-num">${lastNight.quality != null ? lastNight.quality : '—'}</span><span class="hero-unit">/10 qualità</span></div>
-        <div><p class="hero-dur">${formatDuration(lastNight.durationMin)}</p><p class="hero-dur-label">di sonno</p></div>
+        <div><p class="hero-dur">${formatDuration(lastNight.durationMin)}</p><p class="hero-dur-label">intervallo di sonno</p></div>
       </div>` : `
       <button type="button" class="hero-empty" data-open="${t}">
         <span>Non hai ancora compilato il risveglio di stamattina.</span><span class="hero-cta">Compila ora ›</span>
@@ -905,7 +997,7 @@ function renderTrend() {
         ${correlations.some((c) => c.shown) ? correlations.filter((c) => c.shown).map((c) => `
           <details>
             <summary><strong>${capitalize(VAR_NAME[c.x])} e ${VAR_NAME[c.y]}</strong>: ${c.signalLabel.toLowerCase()}, ${c.direction === 'positive' ? 'positivo' : 'negativo'} · ${c.n} notti${c.warn ? ' <span class="warn-tag">pochi dati</span>' : ''}</summary>
-            <p class="detail">Nelle tue notti, ${MORE_X[c.x]} corrisponde in media ${Y_DIR[c.y][c.direction === 'positive' ? 0 : 1]}. Non dice che una cosa causi l'altra: entrambe potrebbero dipendere da altro (stress, orari, attività).
+            <p class="detail">Nelle tue notti, ${MORE_X[c.x]} corrisponde in media ${Y_DIR[c.y][c.direction === 'positive' ? 0 : 1]}. Non dice che una cosa causi l'altra: entrambe potrebbero dipendere da altro (stress, orari, attività).${AWAKENING_KEYS.includes(c.x) ? ' Calcolata solo sulle notti con i risvegli indicati; molte notti senza risvegli rendono il valore di r meno informativo.' : ''}
             <br>n=${c.n} notti dal ${fmtDate(c.from)} al ${fmtDate(c.to)} · r=${c.r.toFixed(2)} (Pearson: misura solo relazioni lineari). "${c.signalLabel}" descrive quanto è marcata l'associazione in queste notti, non quanto sia certa: ${c.warn ? 'con meno di 30 notti può cambiare molto con nuovi dati.' : 'anche con più di 30 notti può indebolirsi o sparire nel tempo.'}${excludedNote(excludedForPair(c))}</p>
           </details>`).join('') : `<p class="muted">Nessuna associazione da mostrare.${excludedNote(nightsExcludedAny)}</p>`}
         ${hiddenPairsHTML(correlations)}
