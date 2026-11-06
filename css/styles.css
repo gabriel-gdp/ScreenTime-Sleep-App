@@ -130,6 +130,26 @@ h1, h2, h3, p { margin: 0; }
 }
 .btn-chip:active { background: var(--accent-soft); }
 
+/* Note sotto una riga (data dello screen time, risvegli non registrati) */
+.row-note { padding-bottom: 10px; }
+.row-note .msg { margin-top: 0; }
+.row-note .small { font-size: 13px; }
+
+/* Risvegli notturni */
+.aw-check { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 44px; font-size: 16px; cursor: pointer; }
+.aw-check input { flex: none; width: 24px; height: 24px; margin: 0; accent-color: var(--accent); cursor: pointer; }
+.stepper { gap: 6px; }
+.btn-chip.step { width: 44px; padding: 0; font-size: 20px; font-weight: 600; }
+.num-input {
+  width: 4.5rem; height: 46px; border-radius: 12px; border: 1px solid var(--control-line);
+  background: var(--surface-2); color: var(--ink); text-align: center; font-size: 17px; font-weight: 600;
+  font-variant-numeric: tabular-nums; padding: 0; -webkit-appearance: none; appearance: none;
+}
+.num-input::placeholder { color: var(--accent); font-weight: 500; font-size: 15px; }
+.num-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.num-input[aria-invalid="true"] { border-color: var(--danger); box-shadow: 0 0 0 3px var(--danger-soft); }
+.unit { font-size: 14px; color: var(--ink-soft); }
+
 .quality-block { border-top: 1px solid var(--line); padding: 14px 0 16px; }
 .quality-label { font-size: 16px; margin-bottom: 12px; }
 .quality-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
@@ -267,7 +287,9 @@ h1, h2, h3, p { margin: 0; }
 .bar-col { display: flex; flex-direction: column; align-items: center; gap: 4px; min-width: 0; }
 .bar-value { font-size: 11px; color: var(--ink-soft); font-variant-numeric: tabular-nums; height: 14px; white-space: nowrap; }
 .bar-track { width: 100%; max-width: 30px; height: 110px; display: flex; align-items: flex-end; }
-.bar { width: 100%; background: var(--accent); border-radius: 6px 6px 3px 3px; }
+.bar { width: 100%; background: var(--accent); position: relative; overflow: hidden; border-radius: 6px 6px 3px 3px; }
+/* Minuti svegli: tratteggio chiaro in cima alla barra dell'intervallo */
+.bar-awake { position: absolute; left: 0; right: 0; top: 0; background: repeating-linear-gradient(135deg, var(--surface) 0 3px, var(--accent-soft) 3px 6px); border-bottom: 1px solid var(--surface); }
 .bar.is-outlier { background: repeating-linear-gradient(135deg, var(--warm) 0 4px, var(--warm-soft) 4px 8px); }
 .bar-empty { width: 100%; height: 4px; border-radius: 2px; background: var(--line); }
 .bar-q { width: 26px; height: 26px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 600; background: var(--accent-soft); color: var(--accent); font-variant-numeric: tabular-nums; }
@@ -277,6 +299,7 @@ h1, h2, h3, p { margin: 0; }
 .bars-legend > span { display: inline-flex; align-items: center; gap: 6px; }
 .key { display: inline-flex; align-items: center; justify-content: center; }
 .key-bar { width: 10px; height: 10px; border-radius: 3px; background: var(--accent); }
+.key-awake { width: 10px; height: 10px; border-radius: 3px; border: 1px solid var(--accent); background: repeating-linear-gradient(135deg, var(--surface) 0 2px, var(--accent-soft) 2px 4px); }
 .key-q { width: 18px; height: 18px; border-radius: 50%; background: var(--accent-soft); color: var(--accent); font-size: 10px; font-weight: 600; }
 .key-out { width: 10px; height: 10px; border-radius: 3px; background: repeating-linear-gradient(135deg, var(--warm) 0 3px, var(--warm-soft) 3px 6px); }
 .preview-h { margin-top: 32px; }
