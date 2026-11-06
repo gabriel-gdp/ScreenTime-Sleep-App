@@ -2,7 +2,7 @@
 // quando sei online ricevi sempre l'ultima versione pubblicata (niente
 // più versioni vecchie "incastrate" nella cache dopo un aggiornamento),
 // quando sei offline l'app si apre comunque con l'ultima copia salvata.
-const CACHE_NAME = 'sleep-screen-lab-v8';
+const CACHE_NAME = 'sleep-screen-lab-v9';
 const APP_SHELL = [
   './',
   './index.html',
@@ -12,6 +12,7 @@ const APP_SHELL = [
   './js/app.js',
   './js/demo.js',
   './js/backup.js',
+  './js/record.js',
   './manifest.json',
   './icons/icon-192.png',
   './icons/icon-512.png',

@@ -10,6 +10,7 @@ manifest.json            metadati PWA (nome, icone, tema)
 service-worker.js        cache offline + notifiche locali
 css/styles.css           design system (variabili colore, layout, temi chiaro/scuro)
 js/analytics.js          tutte le formule (pure, testabili) — vedi docs/ANALYTICS_METHODOLOGY.md
+js/record.js             definizione del record di una notte (campi, bozze, risvegli), condivisa da UI e backup
 js/db.js                 layer di storage (IndexedDB + localStorage per le preferenze)
 js/app.js                stato dell'app e rendering dell'interfaccia
 js/demo.js               dati di esempio per la modalità demo (solo in memoria)
@@ -67,6 +68,8 @@ Dettagli del formato e delle regole di importazione: `docs/DATA_MODEL.md` §6–
 Release candidate. Copre la Fase 1–4 (raccolta dati, calendario, riepilogo settimanale, export e backup) più un'anteprima della Fase 6 (regolarità, associazioni, notti migliori) con le formule di `docs/ANALYTICS_METHODOLOGY.md`, che in apertura riporta lo stato di implementazione di ogni analisi.
 
 - **Anomalie**: i valori insoliti richiedono conferma al salvataggio (§7.1); le notti confermate come anomale vengono salvate con un flag, esportate nel CSV ed **escluse di default da tutte le analisi**: medie settimanali, regolarità (§4.6), associazioni e notti migliori. L'esclusione è per campo (orari anomali → fuori durata, tempo senza schermo e regolarità; screen time anomalo → fuori solo lo screen time). Ogni analisi dice quante notti ha escluso, e "Includi le anomalie" nella schermata Andamento le riporta nel calcolo.
+- **Mezzanotte**: lo screen time è il totale del giorno di calendario della sera (il Diario mostra quale giorno, e dopo mezzanotte ricorda di sceglierlo in Tempo di utilizzo); l'ultimo utilizzo può essere dopo mezzanotte (00:30 con addormentamento alle 01:00). I confronti tra orari usano istanti reali, anche al cambio d'ora.
+- **Risvegli notturni** (schema 3): casella "Ho avuto risvegli durante la notte" nel mattino; non selezionata = nessun risveglio, registrato; le notti precedenti restano "non indicate" (mai zero d'ufficio) ed escluse dalle statistiche sui risvegli. "Intervallo di sonno" (addormentamento → risveglio finale) è distinto dal "Sonno effettivo stimato" (intervallo − minuti svegli). Nessuna sleep efficiency: richiederebbe dati non raccolti.
 - **Riepilogo settimanale**: la copertura (notti con almeno un dato su 7) è distinta dalla numerosità di ciascuna media (notti effettivamente usate, con minimo e massimo). Le etichette descrivono quante notti ci sono, non quanto un risultato sia stabile.
 - **Non implementati**: riepilogo mensile, insight testuali, Personal Recovery Score.
 
