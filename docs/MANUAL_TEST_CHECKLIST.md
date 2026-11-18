@@ -67,6 +67,34 @@ Requisiti: iOS 15.4 o successivo (16.4 per le notifiche), app pubblicata su HTTP
 | E5 | Su un **altro** dispositivo o dopo aver rimosso l'app: installa, ripristina il backup | Tutte le notti ricompaiono, calendario e analisi uguali | ✘ |
 | E6 | Esporta CSV e aprilo in Numbers | Una riga per notte, colonne separate; in Excel con impostazioni italiane potrebbe servire "Dati → Da testo" con separatore virgola | ✘ |
 
+## E2. Andamento (Fase 1)
+
+| # | Passi | Risultato atteso | Auto |
+|---|---|---|---|
+| T1 | Andamento → riepilogo | Riquadri con la **mediana**, "metà delle notti tra … e …", min/max e "su N notti"; qualità come barre 1–10; nessuna freccia "vs 7 notti prima" | ✔ |
+| T2 | Tocca "28 notti" e "90 notti", chiudi e riapri l'app | Titolo e copertura cambiano; la scelta resta; a 90 notti niente grafico notte per notte | ✔ |
+| T3 | Regolarità degli orari | Minuti di variabilità per addormentamento e risveglio, numero di notti e periodo; "Come è calcolata e limiti" spiega metodo, esclusioni e limiti; nessun "/100" | ✔ |
+| T4 | Con meno di 14 notti negli ultimi 28 giorni | Messaggio "Servono almeno 14 notti… (N/14 finora)" | ✔ (unità) |
+| T5 | Leggibilità su iPhone in tema chiaro e scuro | Nessun testo tagliato o sovrapposto nei riquadri e nel selettore del periodo | ✘ |
+
+## E3. Schema 4 (Fase 2)
+
+**Prima di aprire la nuova versione sul telefono con i dati reali: salva un backup dalla versione attuale** (Impostazioni → Salva backup completo) e conservalo in File/iCloud Drive. L'app ne chiederà comunque un altro prima di aggiornare.
+
+| # | Passi | Risultato atteso | Auto |
+|---|---|---|---|
+| S1 | Apri la nuova versione con i dati esistenti | Compare "Aggiornamento dei dati" con il numero delle tue notti; "Aggiorna il database" inattivo | ✔ |
+| S2 | "Crea e scarica il backup" → salva in File | Safari mostra il file `…-prima-aggiornamento-v3.json` da salvare; l'esito dice "verificato" con il numero di notti; il file si apre in File | ✘ (il download su iOS) |
+| S3 | Spunta "Ho salvato il file…" → "Aggiorna il database" | Esito con "N notti, ognuna identica a prima"; "Continua" apre il diario; calendario e Andamento mostrano gli stessi valori di prima | ✔ |
+| S4 | Chiudi e riapri l'app | Nessuna nuova richiesta di aggiornamento | ✔ |
+| S5 | Notte scorsa: compila tutto il check-in mattutino con "Ieri e stanotte" chiuso. **Cronometra** | Tempo ≤ 45 s; tipo di giorno già proposto dallo schema (lun–ven vincolato) | ✘ (tempo) |
+| S6 | Apri "Ieri e stanotte", tocca "Sì" e poi di nuovo "Sì" | Primo tocco seleziona, secondo torna a non indicato | ✔ |
+| S7 | "Hai provato a dormire alle" dopo "Ti sei addormentato/a alle" | Messaggio rosso, salvataggio bloccato; con tentativo 4 ore prima chiede conferma | ✔ |
+| S8 | Modifica la qualità di una notte di 3 o più giorni fa → Salva | Domanda "Da dove vengono questi dati?"; la scelta salva | ✔ |
+| S9 | Impostazioni → Schema settimanale e orari degli indicatori | Toccare un giorno alterna Vincolato/Libero; gli orari si aprono con il selettore iOS | ✘ (selettore) |
+| S10 | Selettore orario di "Hai provato a dormire" e "Sei andato/a a letto" | Rotelle iOS, valore centrato, nessuno zoom | ✘ |
+| S11 | Tema chiaro e scuro, testo grande (Impostazioni iOS → Schermo → Dimensioni testo) | Pulsanti Sì/No e tipo di giorno non tagliati né sovrapposti | ✘ |
+
 ## F. Notifiche (iOS 16.4+, app dalla Home)
 
 | # | Passi | Risultato atteso | Auto |
