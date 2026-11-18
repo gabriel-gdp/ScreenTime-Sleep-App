@@ -4,16 +4,25 @@ import {
   pad, todayISO, addDays, nowHHMM, computeNightMetrics, dayStatus,
   daysInMonth, firstWeekdayOfMonth, WEEKDAY_LABELS, downloadCSV, formatDuration,
   minutesToHHMM, hhmmToMinutes,
-  periodSummary, regularityForWindow,
+  periodSummary, regularityForWindow, screenInBedStatus,
+  applyDescriptiveFilters, DEFAULT_DESCRIPTIVE_FILTERS, filtersActive,
   bedtimeRangeWarning, wakeTimeRangeWarning, screenTimeTotalWarning,
   eveningComplete, sleepComplete, eveningStarted, sleepStarted,
 } from './analytics.js';
 import { ANALYSIS_CONFIG as CFG } from './config.js';
-import { generateDemoEntries } from './demo.js';
+import { generateDemoEntries, DEMO_NIGHTS } from './demo.js';
+import { SOURCES, LINKS, STATUS, SUMMARY, BIBLIOGRAPHY_SOURCE } from './bibliography.js';
+import {
+  FIELD_LABELS, PROVENANCE_GROUPS, PROVENANCE_LABELS, SCREEN_STATUS_LABELS, MANUAL_MAX_DAYS_BEFORE,
+  provenanceSummary, fieldsOfGroups, planProvenance, planScreenDate, manualScreenDate, verifyOperation,
+} from './provenance.js';
+import {
+  QUESTIONS, analyzeAll, abstentionText, provenanceNote, resultTexts, sensitivityText, habitualAttempt, newCache, inPresleepWindow,
+} from './inference.js';
 import {
   EMPTY_DRAFT, draftFromRecord, draftToRecord, sameData, hasData, parseIntInput,
   awakeningsDraftError, awakeningsUnknownHistoric, AWAKENINGS_MAX, AWAKE_MINUTES_MAX,
-  CONTEXT_FIELDS, DAY_TYPES, lateChangedFields, withMeta,
+  CONTEXT_FIELDS, DAY_TYPES, PROVENANCE_FIELDS, lateChangedFields, withMeta, screenTimeReference, provenanceOf,
 } from './record.js';
 
 const svg = (inner, extra = '') => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" ${extra}>${inner}</svg>`;
@@ -71,6 +80,8 @@ const state = {
   includeOutliers: false,
   // Periodo del riepilogo in Andamento (7, 28 o 90 notti): preferenza locale.
   period: [7, 28, 90].includes(Number(getPref('trend_period', '7'))) ? Number(getPref('trend_period', '7')) : 7,
+  // Filtri delle descrizioni (Fase 5.1): preferenza di questo dispositivo.
+  filters: readFilters(),
   // Ripristino da backup in corso: null, { error }, { records, meta, mode,
   // confirm, busy } oppure { done, ok, text }.
   importState: null,
@@ -85,6 +96,9 @@ const state = {
   migration: null,
   // Dati inseriti oltre la finestra di tempestività: domanda sull'origine.
   askProvenance: false,
+  // Strumento "Origine dei dati" (Impostazioni): null oppure
+  // { mode: 'prov' | 'screen', ...scelte, busy, result, undo }.
+  provTool: null,
 };
 function readTemplate() {
   try {
@@ -689,12 +703,25 @@ function summaryHTML(v) {
       ? 'Alcuni valori sembrano insoliti. Se sono corretti, tocca di nuovo il pulsante per salvarli comunque: verranno segnati come anomalie, non modificati.'
       : 'Se il valore è corretto, tocca di nuovo il pulsante per salvarlo.', 'info'));
   }
+  // L0 (Fase 4): latenze e uso dello schermo dopo il tentativo e a letto.
+  // "A letto" solo con coricamento e ultimo utilizzo registrati all'epoca:
+  // la provenienza è quella che i dati avranno salvandoli adesso.
+  const facts = [];
+  if (m.screenAfterAttempt != null) facts.push(`Schermo dopo aver provato a dormire: <strong>${m.screenAfterAttempt ? 'sì' : 'no'}</strong>`);
+  if (r.inBedTime && r.lastScreenUse && !m.inBedError) {
+    const preview = withMeta(r, state.entries[state.selectedDate], new Date(), state.provenanceAnswer || null);
+    const st = screenInBedStatus(preview, state.selectedDate);
+    facts.push(`Schermo a letto: <strong>${st === 'yes' ? 'sì' : st === 'no' ? 'no' : 'non determinabile'}</strong>${st === 'undetermined' ? ' <span class="muted">(solo con orari registrati all\'epoca)</span>' : ''}`);
+  }
   return `
     <div class="stat-grid">
       ${stat('Intervallo di sonno', formatDuration(m.durationMin), durationHint)}
       ${stat('Sonno effettivo stimato', formatDuration(m.effectiveSleepMin), effHint)}
       ${stat('Senza schermo prima di dormire', formatDuration(m.screenFreeMin), freeHint)}
+      ${m.latencyMin != null ? stat('Tempo per addormentarti', formatDuration(m.latencyMin), 'Dal tentativo all\'addormentamento · stima soggettiva') : ''}
+      ${m.latencyAfterUseMin != null && m.latencyAfterUseMin !== m.latencyMin ? stat('Dopo l\'ultimo utilizzo', formatDuration(m.latencyAfterUseMin), 'Da quando hai lasciato lo schermo · stima soggettiva') : ''}
     </div>
+    ${facts.length ? `<ul class="night-facts">${facts.map((f) => `<li>${f}</li>`).join('')}</ul>` : ''}
     ${msgs.join('')}`;
 }
 
@@ -984,6 +1011,191 @@ const nightShort = (date) => `${weekdayShort(addDays(date, -1))}–${weekdayShor
 // interquartile (IQR), minimo–massimo, numero di notti e copertura. Nessun
 // confronto con frecce tra periodi e nessuna media "di sintesi".
 const PERIODS = [7, 28, 90];
+
+// ---------- Filtri delle descrizioni (Fase 5.1) ----------
+// Valgono per la panoramica e per il grafico degli orari; non per la
+// regolarità e per le tre domande, che hanno criteri propri.
+function readFilters() {
+  let f = {};
+  try { f = JSON.parse(getPref('trend_filters', '{}')) || {}; } catch (e) { f = {}; }
+  return {
+    dayType: ['all', 'constrained', 'free'].includes(f.dayType) ? f.dayType : DEFAULT_DESCRIPTIVE_FILTERS.dayType,
+    includeUnusual: f.includeUnusual === true,
+    provenance: ['all', 'recorded'].includes(f.provenance) ? f.provenance : DEFAULT_DESCRIPTIVE_FILTERS.provenance,
+  };
+}
+function saveFilters() { setPref('trend_filters', JSON.stringify(state.filters)); }
+function filteredEntries() { return applyDescriptiveFilters(state.entries, state.filters); }
+const DAYTYPE_FILTER_WORD = { all: 'tutti i giorni', constrained: 'solo mattini vincolati', free: 'solo mattini liberi' };
+function filtersHTML(filt) {
+  const f = state.filters;
+  const r = filt.removed;
+  const summary = `${DAYTYPE_FILTER_WORD[f.dayType]} · notti insolite ${f.includeUnusual ? 'incluse' : 'escluse'} · ${f.provenance === 'all' ? 'tutte le origini' : "solo dati registrati all'epoca"}`;
+  const effects = [];
+  if (r.dayType) effects.push(`${nightsWord(r.dayType)} dell'altro tipo di giorno`);
+  if (r.noDayType) effects.push(`${nightsWord(r.noDayType)} senza tipo di giorno`);
+  if (r.unusual) effects.push(`${nightsWord(r.unusual)} ${r.unusual === 1 ? 'insolita' : 'insolite'}`);
+  if (r.values) effects.push(`${r.values} ${r.values === 1 ? 'valore' : 'valori'} non ${r.values === 1 ? 'registrato' : 'registrati'} all'epoca${r.nightsEmptied ? ` (${nightsWord(r.nightsEmptied)} senza altri dati)` : ''}`);
+  const seg = (name, val, label) => `<button type="button" class="seg-btn" data-f-${name}="${val}" aria-pressed="${f[name === 'daytype' ? 'dayType' : 'provenance'] === val}">${label}</button>`;
+  return `
+      <details class="filters" id="trend-filters"${filtersActive(f) ? ' open' : ''}>
+        <summary><span class="filters-label">Filtri</span><span class="filters-summary" id="filters-summary">${summary}</span></summary>
+        <div class="filters-body">
+          <p class="filters-h" id="fdt-label">Tipo di giorno</p>
+          <div class="segmented seg-3" role="group" aria-labelledby="fdt-label">
+            ${seg('daytype', 'all', 'Tutti')}${seg('daytype', 'constrained', 'Vincolati')}${seg('daytype', 'free', 'Liberi')}
+          </div>
+          <div class="check-row"><input type="checkbox" id="f-unusual" ${f.includeUnusual ? 'checked' : ''}> <label for="f-unusual">Includi le notti insolite</label></div>
+          <p class="filters-h" id="fprov-label">Origine dei dati</p>
+          <div class="segmented seg-2" role="group" aria-labelledby="fprov-label">
+            ${seg('prov', 'all', 'Tutte')}${seg('prov', 'recorded', "Registrate all'epoca")}
+          </div>
+          <p class="muted small">I filtri valgono per questa panoramica e per il grafico degli orari. Regolarità e "Schermo e sonno" usano sempre i propri criteri, descritti in ogni scheda. I dati salvati non cambiano.</p>
+        </div>
+      </details>
+      ${effects.length ? `<p class="muted small filters-effect" id="filters-effect">Esclusi dai filtri: ${effects.join('; ')}.</p>
+      <p class="muted small filters-order" id="filters-order">Ogni notte è contata una sola volta, per il primo filtro che la esclude, in quest'ordine: tipo di giorno, notti insolite, origine. I numeri non vanno sommati come se ogni filtro fosse applicato da solo a tutte le notti. I valori non registrati all'epoca sono tolti dalle notti che restano; le notti rimaste senza altri dati sono indicate tra parentesi.</p>` : ''}`;
+}
+
+// ---------- Grafico degli orari (actogramma, Fase 5.2) ----------
+// Una riga per notte, sull'orologio dalle 18:00 alle 14:00 del giorno dopo:
+// tratto chiaro dal coricamento al tentativo, tratto medio dal tentativo
+// all'addormentamento, barra piena dall'addormentamento al risveglio; punto
+// dell'ultimo utilizzo; segno del solito orario H (come in P1: notti
+// precedenti registrate all'epoca). Pieno = dati inseriti al momento o
+// ricopiati da note dell'epoca; vuoto = ricostruiti o di origine non nota.
+// Descrittivo: nessuna inferenza.
+const ACT_START = 18 * 60, ACT_SPAN = 20 * 60;
+const actX = (hhmm) => { if (!hhmm) return null; const m = (hhmmToMinutes(hhmm) - ACT_START + 1440) % 1440; return m <= ACT_SPAN ? m : null; };
+const RECORDED = ['prospective', 'transcribed'];
+function actogramHTML(filt, dates) {
+  const ents = filt.entries;
+  const n = dates.length;
+  const rowH = n <= 7 ? 26 : n <= 28 ? 13 : 7;
+  const W = 360, L = 58, R = 8, top = 4, axisH = 22;
+  const pw = W - L - R;
+  const X = (m) => L + (m / ACT_SPAN) * pw;
+  const H = top + n * rowH + axisH;
+  const cache = newCache();
+  const parts = [], rows = [];
+  let withData = 0, offAxis = 0;
+  dates.forEach((date, i) => {
+    // Solo il record filtrato: nessun valore recuperato da state.entries.
+    const y = top + i * rowH, e = ents[date];
+    const mid = y + rowH / 2, bh = Math.max(3, rowH * 0.56);
+    const dow = new Date(date + 'T12:00:00').getDay();
+    if (e && e.dayType === 'free') parts.push(`<rect class="act-free" data-date="${date}" x="${L}" y="${y}" width="${pw}" height="${rowH}"/>`);
+    const showLabel = n <= 28 || i % 7 === 0 || i === n - 1;
+    if (showLabel) parts.push(`<text class="act-day" x="${L - 4}" y="${mid + 3.5}" text-anchor="end">${WEEKDAY_LABELS[(dow + 6) % 7]} ${Number(date.slice(8))}</text>`);
+    // flags[campo] = 'incoherent' | 'offaxis' (solo stati ed errori già
+    // esistenti); un valore assente resta "—".
+    const row = { date, inBed: null, attempt: null, onset: null, wake: null, last: null, h: null, note: [], flags: {} };
+    rows.push(row);
+    if (!e) return;
+    const m = computeNightMetrics(e, date);
+    const rec = (f) => RECORDED.includes(provenanceOf(e, f));
+    const cls = (base, fields) => `${base}${fields.every(rec) ? '' : ' hollow'}`;
+    let any = false;
+    const xs = { inBed: actX(e.inBedTime), attempt: e.sleepAttempt && !m.attemptError ? actX(e.sleepAttempt) : null, onset: actX(e.bedtime), wake: actX(e.wakeTime), last: actX(e.lastScreenUse) };
+    ['inBedTime', 'sleepAttempt', 'bedtime', 'wakeTime', 'lastScreenUse'].forEach((f) => { if (e[f] && actX(e[f]) == null) offAxis++; });
+    Object.assign(row, { inBed: e.inBedTime || null, attempt: e.sleepAttempt || null, onset: e.bedtime || null, wake: e.wakeTime || null, last: e.lastScreenUse || null });
+    ['inBedTime', 'sleepAttempt', 'bedtime', 'wakeTime', 'lastScreenUse'].forEach((f) => { if (e[f] && !rec(f)) row.note.push(f); });
+    // Incoerenze già calcolate da computeNightMetrics, poi orari fuori fascia.
+    if (m.durationError) { row.flags.bedtime = 'incoherent'; row.flags.wakeTime = 'incoherent'; }
+    if (m.attemptError) row.flags.sleepAttempt = 'incoherent';
+    if (m.inBedError) row.flags.inBedTime = 'incoherent';
+    if (m.screenFreeError) row.flags.lastScreenUse = 'incoherent';
+    ['inBedTime', 'sleepAttempt', 'bedtime', 'wakeTime', 'lastScreenUse'].forEach((f) => { if (e[f] && !row.flags[f] && actX(e[f]) == null) row.flags[f] = 'offaxis'; });
+    if (!m.durationError && xs.onset != null && xs.wake != null && xs.wake > xs.onset) {
+      parts.push(`<rect class="${cls('act-sleep', ['bedtime', 'wakeTime'])}" data-date="${date}" x="${X(xs.onset)}" y="${mid - bh / 2}" width="${X(xs.wake) - X(xs.onset)}" height="${bh}" rx="1.5"/>`);
+      any = true;
+    } else if (m.durationError) row.note.push('incoerente');
+    const endLat = xs.onset != null ? xs.onset : null;
+    if (xs.attempt != null && endLat != null && endLat >= xs.attempt) {
+      parts.push(`<rect class="${cls('act-lat', ['sleepAttempt', 'bedtime'])}" data-date="${date}" x="${X(xs.attempt)}" y="${mid - bh / 2}" width="${Math.max(1, X(endLat) - X(xs.attempt))}" height="${bh}" rx="1.5"/>`);
+      any = true;
+    }
+    // Tratto "a letto" (consolidamento della Fase 5). Fine del tratto:
+    // - tentativo presente e utilizzabile (coerente e nella fascia) → tentativo;
+    // - tentativo davvero assente → addormentamento (ripiego già previsto);
+    // - tentativo presente ma incoerente o fuori fascia → nessun tratto:
+    //   niente ripiego silenzioso (il valore resta nella tabella, segnato).
+    // Pieno solo se entrambi gli estremi usati sono registrati all'epoca.
+    const attemptPresent = !!e.sleepAttempt;
+    let bedEnd = null, bedEndField = null;
+    if (attemptPresent && xs.attempt != null) { bedEnd = xs.attempt; bedEndField = 'sleepAttempt'; }
+    else if (!attemptPresent && xs.onset != null) { bedEnd = xs.onset; bedEndField = 'bedtime'; }
+    if (xs.inBed != null && bedEnd != null && bedEnd >= xs.inBed && !m.inBedError) {
+      parts.push(`<rect class="${cls('act-bed', ['inBedTime', bedEndField])}" data-date="${date}" data-end="${bedEndField}" x="${X(xs.inBed)}" y="${mid - bh / 2}" width="${Math.max(1, X(bedEnd) - X(xs.inBed))}" height="${bh}" rx="1.5"/>`);
+      any = true;
+    }
+    // Riferimento H di P1–P3 (decisione del 18/11/2026): volutamente
+    // calcolato su tutte le notti con i criteri consolidati, indipendente dai
+    // filtri descrittivi. È l'unico accesso a state.entries del grafico.
+    const h = habitualAttempt(state.entries, date, { provenance: 'recorded', cache });
+    if (h.time && actX(h.time) != null) {
+      row.h = h.time;
+      parts.push(`<line class="act-h" data-date="${date}" x1="${X(actX(h.time))}" x2="${X(actX(h.time))}" y1="${y + 1}" y2="${y + rowH - 1}"/>`);
+    }
+    if (xs.last != null) {
+      parts.push(`<circle class="${cls('act-dot', ['lastScreenUse'])}" data-date="${date}" cx="${X(xs.last)}" cy="${mid}" r="${Math.max(2, Math.min(4, rowH * 0.22))}"/>`);
+      any = true;
+    }
+    if (e.unusualNight === true) parts.push(`<path class="act-unusual" data-date="${date}" d="M${L - 2} ${mid - 3} l3 3 l-3 3 l-3 -3 z"/>`);
+    if (any) withData++;
+  });
+  // Asse: ogni 2 ore, dalle 18 alle 14.
+  const ticks = [];
+  for (let k = 0; k <= ACT_SPAN; k += 120) {
+    const x = X(k);
+    const lab = pad(((ACT_START + k) / 60) % 24);
+    ticks.push(`<line class="act-grid" x1="${x}" x2="${x}" y1="${top}" y2="${top + n * rowH}"/><text class="act-tick" x="${x}" y="${top + n * rowH + 14}" text-anchor="middle">${lab}</text>`);
+  }
+  const first = dates[0], last = dates[n - 1];
+  const desc = `Orari di ${n} notti dal ${fmtDate(first)} al ${fmtDate(last)}: ${withData} con almeno un orario. Barre dal coricamento al risveglio, punto dell'ultimo utilizzo, segno del solito orario. I dati sono anche nella tabella sotto il grafico.`;
+  // Cella: "—" = dato assente; ° = non registrato all'epoca; "incoerente" e
+  // "fuori grafico" = valore presente ma non disegnato (distinti tra loro).
+  const FLAG_WORD = { incoherent: 'incoerente', offaxis: 'fuori grafico' };
+  const cell = (v, f, row) => (v ? `${v}${row.note.includes(f) ? '°' : ''}${row.flags[f] ? ` <span class="cell-flag" data-flag="${row.flags[f]}">· ${FLAG_WORD[row.flags[f]]}</span>` : ''}` : '—');
+  return `
+    <section class="analysis-block" aria-labelledby="act-title">
+      <h2 class="section-h serif" id="act-title">Orari</h2>
+      <p class="section-sub">Le tue notti una sotto l'altra, dalla più vecchia alla più recente${filtersActive(state.filters) ? ', con i filtri della panoramica' : ''}. È una descrizione: non dice che cosa influisce su che cosa.</p>
+      <div class="card card-pad act-card">
+        <svg class="actogram" viewBox="0 0 ${W} ${H}" role="img" aria-labelledby="act-svg-title act-svg-desc" preserveAspectRatio="xMidYMin meet">
+          <title id="act-svg-title">Grafico degli orari</title>
+          <desc id="act-svg-desc">${desc}</desc>
+          ${ticks.join('')}
+          ${parts.join('')}
+        </svg>
+        <div class="act-legend" aria-hidden="true">
+          <span><i class="sw act-bed-sw"></i>a letto, prima del tentativo</span>
+          <span><i class="sw act-lat-sw"></i>dal tentativo all'addormentamento</span>
+          <span><i class="sw act-sleep-sw"></i>sonno (fino al risveglio)</span>
+          <span><i class="sw act-dot-sw"></i>ultimo utilizzo dello schermo</span>
+          <span><i class="sw act-h-sw"></i>solito orario di riposo</span>
+          <span><i class="sw act-hollow-sw"></i>vuoto: ricostruito o origine non nota</span>
+          <span><i class="sw act-free-sw"></i>mattino libero</span>
+          <span><i class="sw act-unusual-sw"></i>notte insolita</span>
+        </div>
+        <p class="muted small act-h-note">Il riferimento H rappresenta l\'orario abituale utilizzato nelle analisi P1–P3. È indipendente dai filtri descrittivi applicati all\'actogramma.</p>
+        ${offAxis ? `<p class="muted small">${offAxis} ${offAxis === 1 ? 'orario è fuori' : 'orari sono fuori'} dalla fascia 18:00–14:00 e non ${offAxis === 1 ? 'è disegnato' : 'sono disegnati'}: ${offAxis === 1 ? 'lo trovi' : 'li trovi'} nella tabella.</p>` : ''}
+        <details>
+          <summary>Vedi come tabella</summary>
+          <div class="table-scroll"><table class="prov-table act-table">
+            <thead><tr><th scope="col">Notte</th><th scope="col">A letto</th><th scope="col">Tentativo</th><th scope="col">Addorm.</th><th scope="col">Risveglio</th><th scope="col">Ultimo uso</th><th scope="col">Solito orario</th></tr></thead>
+            <tbody>${rows.slice().reverse().map((row) => `<tr data-date="${row.date}"><th scope="row">${nightShort(row.date)}</th><td>${cell(row.inBed, 'inBedTime', row)}</td><td>${cell(row.attempt, 'sleepAttempt', row)}</td><td>${cell(row.onset, 'bedtime', row)}</td><td>${cell(row.wake, 'wakeTime', row)}</td><td>${cell(row.last, 'lastScreenUse', row)}</td><td>${row.h || '—'}</td></tr>`).join('')}</tbody>
+          </table></div>
+          <p class="muted small">— = dato assente. ° = ricostruito a memoria o di origine non nota. "incoerente" = in contrasto con gli altri orari della notte (non disegnato). "fuori grafico" = fuori dalla fascia 18:00–14:00 (non disegnato). Notti dalla più recente.</p>
+        </details>
+        <details>
+          <summary>Come leggerlo e limiti</summary>
+          <p class="detail">Ogni riga è una notte, indicata con il giorno del risveglio, dalla sera (a sinistra, dalle 18:00) al mattino dopo (a destra, fino alle 14:00). Il tratto più chiaro è il tempo a letto prima di provare a dormire, quello medio il tempo dal tentativo all'addormentamento, la barra piena il sonno fino al risveglio, senza i risvegli notturni (di cui non si conoscono gli orari). Il punto è l'ultimo utilizzo dello schermo. Il segno verticale è il tuo solito orario di riposo in quella notte, calcolato come nelle tre domande (mediana delle 28 notti precedenti, almeno 14 registrate all'epoca, senza anomalie). Il riferimento H rappresenta l\'orario abituale utilizzato nelle analisi P1–P3. È indipendente dai filtri descrittivi applicati all\'actogramma. Se il tentativo di dormire è incoerente o fuori dalla fascia del grafico, il tratto "a letto" non viene disegnato invece di essere sostituito con l'addormentamento; il valore resta nella tabella, segnato.</p>
+          <p class="detail"><strong>Limiti.</strong> Gli orari sono letti sull'orologio: nelle notti del cambio d'ora la lunghezza delle barre può differire di un'ora dal tempo reale. Sono stime soggettive inserite al mattino. Le notti con orari incoerenti non hanno la barra del sonno.</p>
+        </details>
+      </div>
+    </section>`;
+}
 const fmtDur = (v) => formatDuration(Math.round(v));
 const METRIC_UI = {
   durationMin: { label: 'Intervallo di sonno', fmt: fmtDur },
@@ -991,8 +1203,10 @@ const METRIC_UI = {
   awakenings: { label: 'Risvegli per notte', fmt: (v) => (Number.isInteger(v) ? String(v) : v.toFixed(1)) },
   screenTimeTotal: { label: 'Screen time della giornata', fmt: fmtDur },
   screenFreeMin: { label: 'Senza schermo prima di dormire', fmt: fmtDur },
+  latencyMin: { label: 'Tempo per addormentarti', fmt: fmtDur },
+  latencyAfterUseMin: { label: 'Dopo l\'ultimo utilizzo', fmt: fmtDur },
 };
-const FIELD_WORD = { durationMin: 'intervallo di sonno', effectiveSleepMin: 'sonno effettivo stimato', screenFreeMin: 'tempo senza schermo', screenTimeTotal: 'screen time' };
+const FIELD_WORD = { durationMin: 'intervallo di sonno', effectiveSleepMin: 'sonno effettivo stimato', screenFreeMin: 'tempo senza schermo', screenTimeTotal: 'screen time', latencyMin: 'tempo per addormentarti', latencyAfterUseMin: 'tempo dopo l\'ultimo utilizzo' };
 const nightsWord = (n) => `${n} ${n === 1 ? 'notte' : 'notti'}`;
 
 function statLines(s, fmt) {
@@ -1006,11 +1220,11 @@ function statLines(s, fmt) {
     <p class="n">su ${nightsWord(s.n)}</p>`;
 }
 
-function metricTile(key, cur) {
+function metricTile(key, cur, more = '') {
   const ui = METRIC_UI[key];
   const s = cur.stats[key];
-  const extra = key === 'awakenings' && s.n > 0
-    ? `<p class="n">${s.values.filter((v) => v > 0).length} su ${nightsWord(s.n)} con almeno un risveglio</p>` : '';
+  const extra = (key === 'awakenings' && s.n > 0
+    ? `<p class="n">${s.values.filter((v) => v > 0).length} su ${nightsWord(s.n)} con almeno un risveglio</p>` : '') + more;
   return `
     <div class="metric-tile">
       <p class="label">${ui.label}${s.median != null ? ' <span class="muted-delta">mediana</span>' : ''}</p>
@@ -1022,7 +1236,7 @@ function metricTile(key, cur) {
 }
 
 // Qualità: scala ordinale 1–10, mostrata come distribuzione dei voti più la
-// mediana. Indicatore descrittivo secondario (FINAL_ANALYTICS_SPEC §4).
+// mediana. Indicatore descrittivo secondario (docs/research/FINAL_ANALYTICS_SPEC.md §4).
 function qualityTile(cur) {
   const s = cur.stats.quality;
   const maxC = Math.max(1, ...cur.qualityCounts);
@@ -1063,9 +1277,40 @@ function barsHTML(summary) {
     <div class="bars-legend"><span><span class="key key-bar"></span>Intervallo di sonno</span>${summary.nights.some((n) => n.awakeMinutes > 0) ? '<span><span class="key key-awake"></span>Minuti svegli</span>' : ''}${compact ? '' : '<span><span class="key key-q">7</span>Qualità</span>'}${summary.excluded.length ? '<span><span class="key key-out"></span>Anomalia</span>' : ''}</div>`;
 }
 
+// Descrittivo (tutte le provenienze): notti del periodo con l'ultimo
+// utilizzo nell'ora prima del tuo solito orario di riposo (H).
+// Consolidamento della Fase 5: sia l'ultimo utilizzo sia il solito orario H
+// di questa metrica DESCRITTIVA si calcolano sul set filtrato `ents` (tutti
+// i filtri attivi, compreso il tipo di giorno), mai su state.entries.
+// habitualAttempt e i suoi criteri non cambiano: cambia solo l'insieme di
+// notti che riceve. Nessun valore predefinito per `ents`, perché non si
+// possa tornare per sbaglio ai dati non filtrati. L'H delle schede P1–P3 e
+// dell'actogramma resta quello consolidato, indipendente dai filtri.
+function habitualShareHTML(cur, ents) {
+  const cache = newCache();
+  let yes = 0, n = 0, noH = 0, lastNoH = null;
+  cur.nights.forEach((x) => {
+    const e = ents[x.date];
+    if (!e || !e.lastScreenUse || (e.is_outlier_bedtime && !state.includeOutliers)) return;
+    const h = habitualAttempt(ents, x.date, { provenance: 'all', cache });
+    if (!h.time) { noH++; lastNoH = h; return; }
+    n++; if (inPresleepWindow(e.lastScreenUse, h.time)) yes++;
+  });
+  const active = filtersActive(state.filters);
+  const missing = active && noH
+    ? `<p class="n habitual-missing">Solito orario non calcolabile con questi filtri (servono almeno ${CFG.HABITUAL_MIN_VALUES} notti valide nelle ${CFG.HABITUAL_WINDOW_NIGHTS} precedenti)${lastNoH ? `: ${lastNoH.n}/${lastNoH.min} nell'ultima notte del periodo` : ''}${n ? `; ${nightsWord(noH)} senza solito orario` : ''}.</p>` : '';
+  return (n ? `<p class="n habitual-share">schermo nell'ora prima del tuo solito orario: ${yes} su ${nightsWord(n)}</p>` : '') + missing;
+}
+function actogramSectionHTML() {
+  const days = state.period;
+  const dates = [];
+  for (let i = days - 1; i >= 0; i--) dates.push(addDays(todayISO(), -i));
+  return actogramHTML(filteredEntries(), dates);
+}
 function periodHTML() {
   const days = state.period;
-  const cur = periodSummary(state.entries, todayISO(), days, { includeOutliers: state.includeOutliers });
+  const filt = filteredEntries();
+  const cur = periodSummary(filt.entries, todayISO(), days, { includeOutliers: state.includeOutliers });
   const anyData = cur.nightsWithData > 0;
   const bestWorst = cur.best ? `
     <div class="best-worst">
@@ -1082,7 +1327,7 @@ function periodHTML() {
     </div>` : '';
 
   const allExcluded = state.includeOutliers
-    ? periodSummary(state.entries, todayISO(), days).excluded
+    ? periodSummary(filt.entries, todayISO(), days).excluded
     : cur.excluded;
   const outlierNote = allExcluded.length ? `
     <details class="outlier-note">
@@ -1105,6 +1350,7 @@ function periodHTML() {
       <div class="segmented seg-3" role="group" aria-label="Periodo del riepilogo">
         ${PERIODS.map((p) => `<button type="button" class="seg-btn" data-period="${p}" aria-pressed="${p === days}">${p} notti</button>`).join('')}
       </div>
+      ${filtersHTML(filt)}
       ${anyData ? `
         <div class="metric-grid">
           ${metricTile('durationMin', cur)}
@@ -1112,9 +1358,13 @@ function periodHTML() {
           ${qualityTile(cur)}
           ${metricTile('awakenings', cur)}
           ${metricTile('screenTimeTotal', cur)}
-          ${metricTile('screenFreeMin', cur)}
+          ${metricTile('screenFreeMin', cur, habitualShareHTML(cur, filt.entries))}
+          ${cur.stats.latencyMin.n ? `
+          ${metricTile('latencyMin', cur, cur.afterAttempt.n ? `<p class="n">schermo dopo il tentativo: ${cur.afterAttempt.yes} su ${nightsWord(cur.afterAttempt.n)}</p>` : '')}
+          ${metricTile('latencyAfterUseMin', cur)}` : ''}
         </div>
-        <p class="compare-note"><strong>Come leggere questi numeri.</strong> Il numero grande è la <strong>mediana</strong>: metà delle notti sta sopra, metà sotto. "Metà delle notti tra… e…" è l'intervallo interquartile (dal 25° al 75° percentile): dove cade la metà centrale delle tue notti. Ogni riquadro indica su quante notti è calcolato, perché i dati mancanti differiscono da un riquadro all'altro. Risvegli e sonno effettivo stimato contano solo le notti in cui i risvegli sono indicati. La copertura conta le notti con almeno un dato. Sono descrizioni delle tue notti, non spiegazioni.</p>
+        ${filtersActive(state.filters) ? '<p class="muted small">Con i filtri attivi, copertura e statistiche contano solo le notti e i valori che li soddisfano.</p>' : ''}
+        <p class="compare-note"><strong>Come leggere questi numeri.</strong> Il numero grande è la <strong>mediana</strong>: metà delle notti sta sopra, metà sotto. "Metà delle notti tra… e…" è l'intervallo interquartile (dal 25° al 75° percentile): dove cade la metà centrale delle tue notti. Ogni riquadro indica su quante notti è calcolato, perché i dati mancanti differiscono da un riquadro all'altro. Risvegli e sonno effettivo stimato contano solo le notti in cui i risvegli sono indicati; i tempi per addormentarti solo quelle con l'ora in cui hai provato a dormire, e sono stime soggettive. La copertura conta le notti con almeno un dato. Sono descrizioni delle tue notti, non spiegazioni.</p>
         ${bestWorst}
         ${outlierNote}
         ${days <= 28 ? `<div class="card card-pad chart-block">
@@ -1124,38 +1374,214 @@ function periodHTML() {
     </section>`;
 }
 
-const REASON_WORD = { outlier: 'anomalia confermata', incoherent: 'orari incoerenti' };
+const REASON_WORD = { outlier: 'anomalia confermata', incoherent: 'orari incoerenti', unusual: 'notte insolita', provenance: 'origine non registrata all\'epoca' };
 const roundTo5 = (v) => Math.round(v / 5) * 5;
-
+const signedMin = (v) => { const x = roundTo5(v); return x === 0 ? '0 min' : `${x > 0 ? '+' : '−'}${Math.abs(x)} min`; };
 function regularityHTML() {
   const t = todayISO();
   const r = regularityForWindow(state.entries, t, { includeOutliers: state.includeOutliers });
   const period = `${fmtDate(r.from)} – ${fmtDate(r.to)}`;
-  const excl = r.excluded.length
-    ? `<p class="detail"><strong>Escluse:</strong> ${r.excluded.map((x) => `${nightShort(x.date)} (${REASON_WORD[x.reason]})`).join('; ')}.</p>` : '';
+  const listed = r.excluded.filter((x) => x.reason !== 'provenance');
+  const byProv = r.excluded.length - listed.length;
+  const excl = listed.length
+    ? `<p class="detail"><strong>Escluse:</strong> ${listed.map((x) => `${nightShort(x.date)} (${REASON_WORD[x.reason]})`).join('; ')}.</p>` : '';
+  const provNote = byProv
+    ? `<p class="detail" id="reg-prov-note">${nightsWord(byProv)} ${byProv === 1 ? 'non è considerata' : 'non sono considerate'} perché addormentamento o risveglio sono ricostruiti a memoria o di origine non nota. Puoi classificarne l'origine in Impostazioni → Origine dei dati.</p>` : '';
   const sd = (v) => (v == null ? 'non definita' : `${roundTo5(v)} min`);
+  const tile = (label, v, mean) => `<div><p class="label">${label}</p><p class="serif big-num">${sd(v)}</p><p class="muted small">variabilità attorno alle ${mean || '—'}</p></div>`;
+  const bt = r.byType;
+  const typeRows = (bt.constrained.shown || bt.free.shown) ? `
+    <div class="reg-types">
+      <p class="label">Per tipo di giorno</p>
+      <table class="prov-table"><thead><tr><th scope="col">Mattino</th><th scope="col">Notti</th><th scope="col">Addorm.</th><th scope="col">Risveglio</th></tr></thead><tbody>
+      ${[['constrained', 'Vincolato'], ['free', 'Libero']].map(([k, l]) => `<tr><th scope="row">${l}</th><td>${bt[k].n}</td><td>${bt[k].shown ? sd(bt[k].sdOnset) : '—'}</td><td>${bt[k].shown ? sd(bt[k].sdWake) : '—'}</td></tr>`).join('')}
+      </tbody></table>
+      <p class="muted small">"—": servono almeno ${CFG.REGULARITY_MIN_NIGHTS_PER_TYPE} notti di quel tipo.</p>
+    </div>` : '';
+  const sj = r.sjl;
+  const sjl = sj.shown
+    ? `<p class="reg-sjl" id="reg-sjl"><strong>Differenza tra giorni liberi e vincolati</strong> (punto medio del sonno): ${sj.minutes === 0 ? 'nessuna' : `${signedMin(sj.minutes)}, ${sj.minutes > 0 ? 'più tardi' : 'più presto'} nei giorni liberi`} (${sj.midFree} contro ${sj.midConstrained}; ${sj.nFree} notti libere, ${sj.nConstrained} vincolate).</p>`
+    : `<p class="muted small" id="reg-sjl">Differenza tra giorni liberi e vincolati: servono almeno ${sj.min} notti di ciascun tipo con il tipo di giorno indicato (finora ${sj.nFree} libere, ${sj.nConstrained} vincolate).</p>`;
+  // Notti escluse SOLO da questo confronto per il cambio dell'ora (Fase 4.1).
+  const DST_WORD = {
+    dst_ambiguous: "un orario cade nell'ora ripetuta del ritorno all'ora solare: non si può sapere quale delle due occorrenze hai registrato",
+    dst_nonexistent: "un orario cade nell'ora che non esiste per il passaggio all'ora legale",
+  };
+  const sjlDst = sj.excluded.length
+    ? `<p class="muted small" id="reg-sjl-dst">Non usate per la differenza tra giorni liberi e vincolati (restano nel diario e nelle altre analisi): ${sj.excluded.map((x) => `${nightShort(x.date)} (${DST_WORD[x.reason]})`).join('; ')}.</p>` : '';
   return `
     <section class="analysis-block" aria-labelledby="reg-title">
       <h2 class="section-h serif" id="reg-title">Regolarità degli orari</h2>
       <div class="card card-pad">
         ${r.shown ? `
           <div class="reg-grid">
-            <div><p class="label">Addormentamento</p><p class="serif big-num">${sd(r.sdOnset)}</p><p class="muted small">variabilità attorno alle ${r.meanOnset || '—'}</p></div>
-            <div><p class="label">Risveglio</p><p class="serif big-num">${sd(r.sdWake)}</p><p class="muted small">variabilità attorno alle ${r.meanWake || '—'}</p></div>
+            ${tile('Addormentamento', r.sdOnset, r.meanOnset)}
+            ${tile('Risveglio', r.sdWake, r.meanWake)}
+            ${r.attempt.shown ? tile('Tentativo di dormire', r.attempt.sd, r.attempt.mean) : ''}
           </div>
-          <p class="muted small">${nightsWord(r.n)} con addormentamento e risveglio, ${period}.</p>` : `
-          <p class="muted">Servono almeno ${r.min} notti con addormentamento e risveglio negli ultimi ${r.days} giorni (${r.n}/${r.min} finora).</p>`}
+          <p class="muted small">${nightsWord(r.n)} con addormentamento e risveglio registrati all'epoca, ${period}.${!r.attempt.shown && r.attempt.n ? ` Il tentativo di dormire compare da ${r.attempt.min} notti (${r.attempt.n}/${r.attempt.min}).` : ''}</p>
+          ${typeRows}` : `
+          <p class="muted">Servono almeno ${r.min} notti con addormentamento e risveglio registrati all'epoca negli ultimi ${r.days} giorni (${r.n}/${r.min} finora).</p>`}
+        ${sjl}
+        ${sjlDst}
+        ${provNote}
         <details>
           <summary>Come è calcolata e limiti</summary>
           <p class="detail"><strong>Metodo.</strong> Deviazione standard circolare degli orari, in minuti, arrotondata a 5: indica di quanto i tuoi orari si discostano in genere dal loro valore medio, tenendo conto della mezzanotte (23:30 e 00:30 distano 30 minuti, non 23 ore). Periodo: gli ultimi ${r.days} giorni di calendario. Minimo: ${r.min} notti (scelta progettuale, non uno standard).</p>
-          <p class="detail"><strong>Limiti.</strong> Con 14–20 notti l'incertezza della stima è di circa ±20%. Non considera i risvegli notturni né i sonnellini. Non è un punteggio e non c'è un valore "giusto": descrive solo quanto variano i tuoi orari.</p>
+          <p class="detail"><strong>Dati usati.</strong> Solo orari inseriti al momento o ricopiati da note dell'epoca: le ricostruzioni a memoria tendono a far sembrare gli orari più regolari di quanto siano. Escluse le notti insolite e, di default, le anomalie confermate.</p>
+          <p class="detail"><strong>Giorni liberi e vincolati.</strong> Differenza tra il punto medio del sonno (a metà tra addormentamento e risveglio, sul tempo reale e poi letto sull'orologio: corretto anche nelle notti del cambio d'ora) nei giorni liberi e in quelli vincolati, con il segno. Le notti con un orario inesistente o ripetuto per il cambio d'ora non entrano in questo confronto. È una descrizione, non un giudizio.</p>
+          <p class="detail"><strong>Limiti.</strong> Con 14–20 notti l'incertezza della stima è di circa ±20%, con meno notti per tipo di giorno è maggiore. Non considera i risvegli notturni né i sonnellini. Non è un punteggio e non c'è un valore "giusto": descrive solo quanto variano i tuoi orari.</p>
           ${excl}
           ${r.excluded.some((x) => x.reason === 'outlier') || state.includeOutliers ? `<p class="detail">${state.includeOutliers ? 'Le anomalie confermate sono incluse (impostazione scelta nel riepilogo).' : 'Le anomalie confermate si possono includere dal riepilogo.'}</p>` : ''}
         </details>
+        ${foundationHTML('regularity')}
       </div>
     </section>`;
 }
 
+// ---------- Le tre domande (Fase 4; js/inference.js) ----------
+// Nessun numero finché non sono soddisfatte tutte le condizioni (notti
+// registrate all'epoca, tipo di giorno, gruppi, n_eff): al loro posto, che
+// cosa manca. Il risultato è sempre un'associazione osservata.
+// Motivi di esclusione (Fase 4.1): mutuamente esclusivi, una notte è
+// contata una sola volta, al primo criterio non soddisfatto.
+const EXCL_WORD = {
+  missing: 'senza tutti i dati necessari', incoherent: 'con orari incoerenti tra loro',
+  screenAfterAttempt: "con l'ultimo utilizzo dopo l'ora in cui hai provato a dormire",
+  screenAfterOnset: "con l'ultimo utilizzo dopo l'addormentamento",
+  provenance: 'con dati ricostruiti a memoria o di origine non nota', unusual: 'notti insolite', outlier: 'con anomalie confermate sugli orari',
+  noH: `senza abbastanza notti precedenti (almeno ${CFG.HABITUAL_MIN_VALUES} valide su ${CFG.HABITUAL_WINDOW_NIGHTS}) per il tuo solito orario`,
+  confounder: 'con caffeina tardiva, alcol o stress non indicati come "no"',
+  noDayType: 'senza tipo di giorno', noWindow: 'senza abbastanza notti vicine per il confronto con il periodo',
+};
+function habitualLineHTML(r) {
+  const h = r.habitualNow;
+  if (!h) return '';
+  return h.time
+    ? `<p class="muted small q-habitual">Il tuo solito orario di riposo, oggi: <strong>${h.time}</strong> (mediana di ${h.n} notti valide delle ${CFG.HABITUAL_WINDOW_NIGHTS} precedenti; le anomalie confermate non contano mai).</p>`
+    : `<p class="muted small q-habitual">Il tuo solito orario di riposo non è ancora calcolabile: ${h.n} notti valide delle ${CFG.HABITUAL_WINDOW_NIGHTS} precedenti con l'ora in cui hai provato a dormire, ne servono ${h.min}.</p>`;
+}
+// ---------- Fondamento scientifico (Fase 5.3–5.4; js/bibliography.js) ----------
+// La letteratura sta solo qui e nella sezione delle Impostazioni, mai nella
+// stessa frase di un risultato personale. Numeri solo da fonti V1.
+const SRC = Object.fromEntries(SOURCES.map((x) => [x.id, x]));
+const STATUS_CLASS = { V1: 'v1', V2: 'v2', NV: 'nv', ESCLUSO: 'excl', APP: 'app' };
+const fmtDay = (iso) => new Date(iso + 'T00:00:00').toLocaleDateString('it-IT', { day: 'numeric', month: 'long', year: 'numeric' });
+function sourceItemHTML(src, { full = false } = {}) {
+  const text = src.status === 'V1' || src.status === 'APP' ? src.finding : src.qualitative;
+  const ids = [src.doi ? `DOI ${src.doi}` : null, src.pmid ? `PMID ${src.pmid}` : null].filter(Boolean).join(' · ');
+  return `<li class="src" data-src="${src.id}">
+      <p class="src-head"><span class="src-badge ${STATUS_CLASS[src.status]}">${STATUS[src.status].label}</span>${src.pediatric ? '<span class="src-badge ped">studi su bambini e ragazzi</span>' : ''}<strong>${src.short}</strong></p>
+      ${src.population !== '—' || src.design !== '—' ? `<p class="src-pop">${[src.population, src.design].filter((x) => x && x !== '—').join(' · ')}</p>` : ''}
+      <p class="src-text">${text}</p>
+      ${src.limits ? `<p class="src-lim">Limiti: ${src.limits}</p>` : ''}
+      ${full ? `<p class="src-ref"><em>${src.title}</em>${src.journal && src.journal !== '—' ? `. ${src.journal}` : ''}${ids ? ` · ${ids}` : ''}${src.url ? ` · <a href="${src.url}" target="_blank" rel="noopener noreferrer">fonte originale</a> <span class="muted">(serve internet)</span>` : ''} · ultima verifica: ${fmtDay(src.verifiedOn)}</p>` : ''}
+    </li>`;
+}
+function foundationHTML(key) {
+  const l = LINKS[key];
+  const list = (ids) => `<ul class="src-list">${ids.map((id) => sourceItemHTML(SRC[id])).join('')}</ul>`;
+  return `
+    <details class="q-sec-details foundation" data-foundation="${key}">
+      <summary>7 · Fondamento scientifico</summary>
+      ${l.phenomenon.length ? `<p class="q-sub">Evidenza generale: che cosa hanno trovato studi su altre persone</p>
+      <p class="muted small">Riguarda gruppi di persone, non te: non è una previsione su di te e non spiega il tuo risultato.</p>
+      ${list(l.phenomenon)}` : ''}
+      ${l.context.length ? `<p class="q-sub">Contesto (non prova diretta per adulti)</p>${list(l.context)}` : ''}
+      ${l.method.length ? `<p class="q-sub">Da dove viene il metodo</p>${list(l.method)}` : ''}
+      ${l.measurement.length ? `<p class="q-sub">Limiti della misura</p>${list(l.measurement)}` : ''}
+      <button type="button" class="link-btn" data-goto-science>Tutte le fonti e il loro stato di verifica ›</button>
+    </details>`;
+}
+
+function questionCardHTML(q, r) {
+  const ok = r.status === 'ok';
+  const degenerate = r.status === 'degenerate_variance';
+  const counts = r.counts;
+  const exclusions = Object.entries(EXCL_WORD).filter(([k]) => counts[k]).map(([k, w]) => `${counts[k]} ${w}`);
+  const anomalies = r.includeOutliers ? 'incluse le anomalie confermate sugli orari (scelta nel riepilogo; non per il solito orario)' : 'escluse le anomalie confermate sugli orari';
+  const sec = (n, label, body, id = '') => `<section class="q-sec"${id ? ` id="${id}"` : ''}><h4 class="q-el">${n} · ${label}</h4>${body}</section>`;
+  // 1. Che cosa si analizza
+  const what = q.id === 'P2'
+    ? "Le notti in cui l'ultimo utilizzo dello schermo è dopo l'ora in cui hai provato a dormire, confrontate con le altre. Esito: il tempo dall'ultimo utilizzo (o dal tentativo, se è più tardi) all'addormentamento."
+    : `Le notti in cui l'ultimo utilizzo dello schermo cade nell'ora che precede il tuo solito orario di riposo (da un'ora prima fino al solito orario compreso), confrontate con tutte le altre notti, anche quelle in cui l'ultimo utilizzo è dopo il solito orario. Il solito orario è la mediana delle ore in cui hai provato a dormire nelle ${CFG.HABITUAL_WINDOW_NIGHTS} notti precedenti (almeno ${CFG.HABITUAL_MIN_VALUES} valide), esclusa quella in esame. ${q.id === 'P1' ? "Le notti in cui l'ultimo utilizzo è dopo l'ora in cui hai provato a dormire non sono usate: lo schermo verrebbe dopo l'esito." : "L'ultimo utilizzo può essere dopo l'ora in cui hai provato a dormire, ma non dopo l'addormentamento."} Esito: ${q.outcomeText}.`;
+  const s1 = sec(1, 'Che cosa si analizza', `<p class="muted small">${q.question}</p><p class="detail">${what} L'esposizione è solo sì/no in base all'orario dell'ultimo utilizzo: non misura quanti minuti hai usato lo schermo.</p>`);
+  // 2. Quali dati
+  const s2 = sec(2, 'Quali dati', `
+      <p class="detail">Notti con ${q.fieldsText}, tutti inseriti al momento o ricopiati da note dell'epoca, con il tipo di giorno indicato; escluse le notti insolite; ${anomalies}. Si controlla la coerenza solo degli orari che questa domanda usa.</p>
+      <p class="detail" id="q-${q.id}-nights"><strong>Notti.</strong> Nel diario fino a oggi: ${counts.considered}; usate${ok || degenerate ? ' nel confronto' : ' finora'}: ${counts.eligible}.${exclusions.length ? ` Non usate (ognuna contata una volta, per il primo motivo): ${exclusions.join('; ')}.` : ''}</p>
+      ${provenanceNote(r) ? `<p class="muted small">${provenanceNote(r)}</p>` : ''}`);
+  // 3. Periodo e numeri
+  const nums = r.n
+    ? `<p class="detail">${r.from ? `Dal ${fmtDate(r.from)} al ${fmtDate(r.to)}. ` : ''}${nightsWord(r.n)}${r.n1 != null ? `: ${r.n1} ${q.groupYes}, ${r.n0} ${q.groupNo}` : ''}${r.neff ? `. Notti "indipendenti" stimate (n_eff): ${Math.floor(r.neff)}` : ''}.</p>`
+    : `<p class="detail">Ancora nessun confronto: ${nightsWord(r.kept || 0)} ${r.kept === 1 ? 'utilizzabile' : 'utilizzabili'} su almeno ${CFG.N_EFF_MIN} necessarie.</p>`;
+  const s3 = sec(3, 'Periodo e numeri', `${habitualLineHTML(r)}${nums}`);
+  // 4. Come è calcolato (con la formula)
+  const s4 = `
+    <details class="q-sec-details" id="q-${q.id}-method">
+      <summary>4 · Come è calcolato</summary>
+      <p class="detail">Ogni valore è confrontato con la media delle notti vicine (±${CFG.RESIDUAL_HALF_WINDOW_NIGHTS} giorni, almeno ${CFG.RESIDUAL_MIN_VALUES}), per togliere i cambiamenti lenti, e con la media del suo tipo di giorno (libero o vincolato). Poi si confrontano le medie dei due gruppi. L'intervallo al 95% tiene conto del fatto che notti vicine si somigliano. Con tre domande analizzate insieme si applica la correzione di Benjamini–Hochberg. I valori sono arrotondati a 5 minuti.</p>
+      <pre class="formula" aria-label="Formula">r = valore − media(notti entro ±${CFG.RESIDUAL_HALF_WINDOW_NIGHTS} giorni) − media del tipo di giorno
+Δ = media(r | ${q.id === 'P2' ? 'uso dopo il tentativo' : "ultimo utilizzo in quell'ora"}) − media(r | altre notti)
+n_eff = n · (1 − ρE·ρr) / (1 + ρE·ρr)
+SE = s · √(1/n₁ + 1/n₀) · √(n / n_eff)
+intervallo al 95% = Δ ± 1,96 · SE</pre>
+      <p class="detail">ρE e ρr: somiglianza tra notti consecutive (autocorrelazione) dell'esposizione e dei valori. s: deviazione standard combinata dei due gruppi. Se s è zero il risultato è "non stimabile". Il valore p serve solo alla correzione e non viene mostrato.</p>
+    </details>`;
+  // 5. Nei tuoi dati
+  let s5, s6;
+  const limitsDetails = `<details class="q-sec-details" id="q-${q.id}-limits"><summary>Assunzioni e limiti del metodo</summary><p class="detail">Gli orari sono stime soggettive inserite al mattino. Il metodo tiene conto del periodo e del tipo di giorno, non di altri fattori (impegni, malessere, stress non indicato): per questo un risultato resta un'associazione e non dice che cosa causa che cosa. Dati mancanti che dipendono da com'è andata la notte possono spostare il risultato.</p></details>`;
+  if (degenerate) {
+    s5 = sec(5, 'Nei tuoi dati', abstentionText(r).map((tx) => `<p class="muted">${tx}</p>`).join(''));
+    s6 = sec(6, 'Limiti', limitsDetails);
+  } else if (ok) {
+    const x = resultTexts(r);
+    const sens = r.sensitivity.length ? `
+      <details class="q-sec-details" id="q-${q.id}-sens">
+        <summary>Altre verifiche (analisi di sensibilità)</summary>
+        <ul class="sens-list">${r.sensitivity.map((sv) => `<li><span>${sv.label}</span><strong>${sensitivityText(sv)}</strong></li>`).join('')}</ul>
+        <p class="detail">Se queste righe vanno nella stessa direzione del risultato principale, il risultato non dipende da una scelta particolare dei dati. Non lo sostituiscono.</p>
+      </details>` : '';
+    s5 = sec(5, 'Nei tuoi dati', `
+      <p class="q-result">${x.headline}</p>
+      ${x.descriptive ? `<p class="muted small">${x.descriptive}</p>` : ''}
+      ${x.bh ? msgHTML(x.bh, 'info') : ''}
+      ${sens}`);
+    s6 = sec(6, 'Limiti e spiegazioni alternative', `
+      ${x.clear ? `<p class="detail"><strong>Possibile interpretazione:</strong> ${x.interpretation}</p>
+      <div class="detail"><strong>Spiegazioni alternative:</strong><ul>${x.alternatives.map((a) => `<li>${a}</li>`).join('')}</ul></div>` : '<p class="detail">Senza una differenza chiara non si propongono interpretazioni.</p>'}
+      ${limitsDetails}`);
+  } else {
+    const kept = r.n != null ? r.n : r.kept;
+    s5 = sec(5, 'Nei tuoi dati', `
+      ${abstentionText(r).map((tx) => `<p class="muted">${tx}</p>`).join('')}
+      ${r.status === 'few' ? `<div class="q-progress" role="img" aria-label="${kept} notti utilizzabili su ${CFG.N_EFF_MIN}"><span style="width:${Math.min(100, Math.round((100 * kept) / CFG.N_EFF_MIN))}%"></span></div>` : ''}`);
+    s6 = sec(6, 'Limiti', limitsDetails);
+  }
+  return `
+    <article class="card card-pad q-card" id="q-${q.id}" aria-labelledby="q-${q.id}-title">
+      <div class="q-head">
+        <h3 class="q-title" id="q-${q.id}-title">${q.title}</h3>
+        <span class="badge ${ok ? 'high' : 'low'}">${ok ? 'Dati sufficienti' : degenerate ? 'Risultato non stimabile' : 'Dati non ancora sufficienti'}</span>
+      </div>
+      ${s1}${s2}${s3}${s4}${s5}${s6}
+      ${foundationHTML(q.id)}
+    </article>`;
+}
+function questionsHTML() {
+  const results = analyzeAll(state.entries, { endDate: todayISO(), includeOutliers: state.includeOutliers });
+  return `
+    <section class="analysis-block" aria-labelledby="qs-title">
+      <h2 class="section-h serif" id="qs-title">Schermo e sonno</h2>
+      <p class="section-sub">Tre domande, sempre le stesse. Un risultato compare solo quando ci sono abbastanza notti con dati registrati all'epoca; prima l'app ti dice che cosa manca. Ogni risultato descrive un'associazione nelle tue notti, non una causa.</p>
+      <p class="section-sub" id="qs-outliers">${state.includeOutliers
+    ? "Anomalie confermate sugli orari: <strong>incluse</strong> in queste analisi, nelle verifiche e nelle altre statistiche (non nel calcolo del tuo solito orario)."
+    : "Anomalie confermate sugli orari: <strong>escluse</strong> da queste analisi e dalle altre statistiche."}</p>
+      ${state.includeOutliers || results.some((r) => r.counts && r.counts.outlier > 0)
+    ? `<button type="button" class="btn-ghost qs-toggle" id="toggle-outliers-q">${state.includeOutliers ? 'Escludi le anomalie' : 'Includi le anomalie'}</button>` : ''}
+      ${QUESTIONS.map((q, i) => questionCardHTML(q, results[i])).join('')}
+    </section>`;
+}
 function renderTrend() {
   const key = focusKey();
   const t = todayISO();
@@ -1179,14 +1605,11 @@ function renderTrend() {
 
     ${periodHTML()}
 
+    ${actogramSectionHTML()}
+
     ${regularityHTML()}
 
-    <section class="analysis-block" aria-labelledby="qs-title">
-      <h2 class="section-h serif" id="qs-title">Schermo e sonno</h2>
-      <div class="card card-pad">
-        <p class="muted">Le analisi sul rapporto tra uso dello schermo e sonno saranno disponibili quando il diario conterrà i nuovi dati (ora in cui provi a dormire, tipo di giorno, origine dei dati) per un numero sufficiente di notti. Fino ad allora l'app non mostra associazioni: con pochi dati e notti che si somigliano tra loro, sarebbero spesso apparenti.</p>
-      </div>
-    </section>
+    ${questionsHTML()}
   `;
 
   root.querySelectorAll('[data-open]').forEach((b) => b.addEventListener('click', () => selectNight(b.dataset.open)));
@@ -1197,6 +1620,25 @@ function renderTrend() {
     const again = root.querySelector(`[data-period="${state.period}"]`);
     if (again) again.focus({ preventScroll: true });
   }));
+  // "Tutte le fonti" → sezione Fondamento scientifico nelle Impostazioni.
+  root.querySelectorAll('[data-goto-science]').forEach((b) => b.addEventListener('click', () => {
+    setTab('settings');
+    const sci = document.getElementById('science');
+    if (sci) { sci.open = true; sci.scrollIntoView({ block: 'start' }); const sm = sci.querySelector('summary'); if (sm) sm.focus({ preventScroll: true }); }
+  }));
+  // Filtri (Fase 5.1).
+  const refilter = (focusSel) => {
+    saveFilters();
+    renderTrend();
+    const d = document.getElementById('trend-filters');
+    if (d) d.open = true;
+    const again = focusSel && root.querySelector(focusSel);
+    if (again) again.focus({ preventScroll: true });
+  };
+  root.querySelectorAll('[data-f-daytype]').forEach((b) => b.addEventListener('click', () => { state.filters.dayType = b.dataset.fDaytype; refilter(`[data-f-daytype="${b.dataset.fDaytype}"]`); }));
+  root.querySelectorAll('[data-f-prov]').forEach((b) => b.addEventListener('click', () => { state.filters.provenance = b.dataset.fProv; refilter(`[data-f-prov="${b.dataset.fProv}"]`); }));
+  const fu = document.getElementById('f-unusual');
+  if (fu) fu.addEventListener('change', () => { state.filters.includeUnusual = fu.checked; refilter('#f-unusual'); });
   const tog = document.getElementById('toggle-outliers');
   if (tog) tog.addEventListener('click', () => {
     state.includeOutliers = !state.includeOutliers;
@@ -1204,6 +1646,16 @@ function renderTrend() {
     const det = root.querySelector('.outlier-note');
     if (det) det.open = true;
     const again = document.getElementById('toggle-outliers');
+    if (again) again.focus({ preventScroll: true });
+  });
+  // Stessa preferenza, dalla sezione "Schermo e sonno" (Fase 4.1): P1–P3
+  // usano tutto lo storico, quindi il comando deve esserci anche quando il
+  // periodo scelto nel riepilogo non contiene anomalie.
+  const togQ = document.getElementById('toggle-outliers-q');
+  if (togQ) togQ.addEventListener('click', () => {
+    state.includeOutliers = !state.includeOutliers;
+    renderTrend();
+    const again = document.getElementById('toggle-outliers-q');
     if (again) again.focus({ preventScroll: true });
   });
   restoreFocus(key);
@@ -1325,9 +1777,11 @@ function renderSettings() {
       ${state.demo ? '<p class="muted small">Backup, ripristino ed export non sono disponibili in modalità demo: escine per usare i tuoi dati reali.</p>' : ''}
       ${importPanelHTML()}
     </section>
+    ${provenanceSectionHTML()}
+    ${scienceSectionHTML()}
     <section class="card card-pad">
       <h3 class="settings-title">Modalità demo</h3>
-      <p class="muted">Mostra l'app con 60 notti di dati di esempio, per vedere come appaiono le analisi. I dati finti restano solo in memoria: non si mescolano ai tuoi, non vengono esportati e spariscono quando chiudi l'app.</p>
+      <p class="muted">Mostra l'app con ${DEMO_NIGHTS} notti di dati di esempio, per vedere come appaiono le analisi. I dati finti restano solo in memoria: non si mescolano ai tuoi, non vengono esportati e spariscono quando chiudi l'app.</p>
       <button type="button" class="btn-ghost ${state.demo ? 'active' : ''}" id="demo-toggle" aria-pressed="${state.demo}">${state.demo ? 'Attiva — tocca per uscire' : 'Disattivata'}</button>
     </section>
     <section class="card card-pad">
@@ -1340,6 +1794,7 @@ function renderSettings() {
   document.getElementById('theme-dark').addEventListener('click', () => setTheme('dark'));
   document.getElementById('export-csv').addEventListener('click', () => { if (!state.demo) downloadCSV(state.entries); });
   attachBackupListeners();
+  attachProvenanceListeners();
   root.querySelectorAll('[data-tpl]').forEach((b) => b.addEventListener('click', () => {
     const i = Number(b.dataset.tpl);
     state.dayTemplate[i] = state.dayTemplate[i] === 'constrained' ? 'free' : 'constrained';
@@ -1518,6 +1973,318 @@ async function runImport() {
   showImportPanel();
 }
 
+// ---------- Origine dei dati (Fase 3; js/provenance.js, DATA_MODEL.md §8) ----------
+// Classifica la provenienza dei valori e il giorno dello Screen Time su un
+// intervallo di notti. Anteprima prima della conferma; scrittura in
+// un'unica transazione; rilettura del database e verifica che sia cambiato
+// solo ciò che doveva; "Annulla questa operazione" finché le notti toccate
+// non vengono modificate in altro modo. I valori del diario non cambiano mai.
+const nNotti = (n) => `${n} ${n === 1 ? 'notte' : 'notti'}`;
+const nValori = (n) => `${n} ${n === 1 ? 'valore' : 'valori'}`;
+const fmtDayLong = (date) => new Date(date + 'T00:00:00').toLocaleDateString('it-IT', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+function entryRange() {
+  const dates = Object.keys(state.entries).sort();
+  return { first: dates[0] || todayISO(), last: dates[dates.length - 1] || todayISO() };
+}
+function openProvTool(mode) {
+  const { first, last } = entryRange();
+  state.provTool = mode === 'prov'
+    ? { mode, from: first, to: last, groups: [], target: null, onlyUnknown: true }
+    : { mode, scope: 'range', from: first, to: last, action: null, night: last, choice: null, day: '' };
+}
+
+// Sezione "Fondamento scientifico" (Fase 5.4): tutta la bibliografia,
+// consultabile offline, con lo stato e la data dell'ultima verifica.
+function scienceSectionHTML() {
+  const groups = [
+    ['V1', 'Fonti verificate'], ['V2', 'Fonti con verifica in corso (citate senza numeri)'],
+    ['ESCLUSO', 'Escluse come prova per adulti'], ['NV', 'Non verificate (non usate)'], ['APP', "Verifica dell'app"],
+  ];
+  return `
+    <details class="card card-pad science" id="science">
+      <summary><h3 class="settings-title">Fondamento scientifico</h3></summary>
+      <p class="muted">Le fonti su cui si basano le scelte dell'app, con lo stato di verifica di ciascuna. È consultabile anche senza internet. Le prove della letteratura riguardano gruppi di persone: non sono previsioni su di te e non compaiono mai nella stessa frase dei tuoi risultati.</p>
+      <p class="q-sub">Che cosa dice, in sintesi, la letteratura verificata</p>
+      <ul class="sci-summary">${SUMMARY.map((x) => `<li>${x}</li>`).join('')}</ul>
+      <p class="q-sub">Come sono usate le fonti</p>
+      <ul class="sci-summary">
+        <li>Numeri solo da fonti verificate, sempre con la popolazione e il tipo di studio.</li>
+        <li>Fonti con verifica in corso: solo affermazioni senza numeri.</li>
+        <li>Studi su bambini e ragazzi: solo come contesto, con l'etichetta.</li>
+        <li>Fonti non verificate o escluse: elencate, mai usate a sostegno.</li>
+        <li>Ogni citazione dice se riguarda il fenomeno, il metodo o la misura.</li>
+      </ul>
+      ${groups.map(([st, label]) => {
+    const list = SOURCES.filter((x) => x.status === st);
+    return list.length ? `<details class="sci-group" data-status="${st}"><summary>${label} (${list.length})</summary><p class="muted small">${STATUS[st].detail}</p><ul class="src-list">${list.map((x) => sourceItemHTML(x, { full: true })).join('')}</ul></details>` : '';
+  }).join('')}
+      <p class="muted small">Verifiche del 10–11 novembre 2026; dettagli in ${BIBLIOGRAPHY_SOURCE}. La verifica delle fonti "in corso" può essere completata con accesso diretto agli articoli.</p>
+    </details>`;
+}
+function provenanceSectionHTML() {
+  const sum = provenanceSummary(state.entries);
+  const t = sum.totals;
+  const total = Object.values(t).reduce((a, b) => a + b, 0);
+  const screenTotal = sum.screen.verified + sum.screen.presumed + sum.screen.unknown;
+  const rows = PROVENANCE_FIELDS.filter((f) => Object.values(sum.fields[f]).some((n) => n > 0)).map((f) => {
+    const c = sum.fields[f];
+    return `<tr><th scope="row">${FIELD_LABELS[f]}</th><td>${c.prospective}</td><td>${c.transcribed}</td><td>${c.retrospective}</td><td>${c.unknown}</td></tr>`;
+  }).join('');
+  const off = state.demo;
+  const tool = state.provTool;
+  return `
+    <section class="card card-pad" aria-labelledby="prov-title">
+      <h3 class="settings-title" id="prov-title">Origine dei dati</h3>
+      <p class="muted">Per ogni valore l'app ricorda se è stato inserito al momento, ricopiato da note dell'epoca o ricostruito a memoria. I dati inseriti prima di questa funzione hanno origine non nota finché non li classifichi tu. Classificare non cambia nessun valore del diario e si può correggere quando vuoi.</p>
+      ${total ? `
+      <ul class="prov-summary" id="prov-summary">
+        ${['prospective', 'transcribed', 'retrospective', 'unknown'].map((p) => `<li><span>${PROVENANCE_LABELS[p]}</span><strong>${t[p]}</strong></li>`).join('')}
+      </ul>
+      <p class="muted small">${nValori(total)} in ${nNotti(sum.nights)}.${screenTotal ? ` Giorno dello Screen Time: ${sum.screen.verified} ${sum.screen.verified === 1 ? 'verificato' : 'verificati'}, ${sum.screen.presumed} ${sum.screen.presumed === 1 ? 'presunto' : 'presunti'} (giorno prima del risveglio, non controllato), ${sum.screen.unknown} ${sum.screen.unknown === 1 ? 'sconosciuto' : 'sconosciuti'}.` : ''}</p>
+      <details class="prov-details">
+        <summary>Per campo</summary>
+        <div class="table-scroll"><table class="prov-table">
+          <thead><tr><th scope="col">Campo</th><th scope="col" title="${PROVENANCE_LABELS.prospective}">Al momento</th><th scope="col" title="${PROVENANCE_LABELS.transcribed}">Da note</th><th scope="col" title="${PROVENANCE_LABELS.retrospective}">A memoria</th><th scope="col" title="${PROVENANCE_LABELS.unknown}">Non nota</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table></div>
+      </details>` : '<p class="muted small">Nessun dato salvato.</p>'}
+      ${!tool ? `
+      <div class="data-actions">
+        <div class="data-action">
+          <button type="button" class="btn-ghost" id="prov-open" ${off || !total ? 'disabled' : ''}>Classifica l'origine dei dati</button>
+        </div>
+        <div class="data-action">
+          <button type="button" class="btn-ghost" id="screen-open" ${off || !screenTotal ? 'disabled' : ''}>Giorno dello Screen Time</button>
+          <p class="muted small">Conferma, segna come sconosciuto o correggi il giorno a cui si riferisce lo Screen Time delle notti già salvate.</p>
+        </div>
+      </div>
+      ${off ? '<p class="muted small">Non disponibile in modalità demo.</p>' : ''}` : tool.mode === 'prov' ? provPanelHTML(tool) : screenPanelHTML(tool)}
+    </section>`;
+}
+
+function rangeInputsHTML(tool, prefix) {
+  return `<div class="prov-range">
+      <label class="prov-field"><span>Dal</span><input type="date" id="${prefix}-from" value="${tool.from}" max="${todayISO()}"></label>
+      <label class="prov-field"><span>Al</span><input type="date" id="${prefix}-to" value="${tool.to}" max="${todayISO()}"></label>
+    </div>`;
+}
+function backupHintHTML() {
+  return `<p class="muted small">${lastBackupText().trim()} <button type="button" class="link-btn inline" id="prov-backup">Salva prima un backup</button></p>`;
+}
+function resultHTML(tool) {
+  if (!tool.result) return '';
+  return `${msgHTML(tool.result.text, tool.result.ok ? 'info' : 'error', 'prov-result')}
+    ${tool.undo ? '<button type="button" class="btn-ghost" id="prov-undo">Annulla questa operazione</button>' : ''}`;
+}
+
+function provPanelHTML(tool) {
+  const fields = fieldsOfGroups(tool.groups);
+  const plan = planProvenance(state.entries, { from: tool.from, to: tool.to, fields, target: tool.target, onlyUnknown: tool.onlyUnknown });
+  let preview;
+  if (plan.error) preview = `<p class="muted small">${plan.error}</p>`;
+  else {
+    const parts = [];
+    if (plan.already) parts.push(`${nValori(plan.already)} ${plan.already === 1 ? 'ha' : 'hanno'} già questa origine`);
+    if (plan.kept) parts.push(`${nValori(plan.kept)} con un'origine già indicata ${plan.kept === 1 ? 'resta com\'è' : 'restano come sono'}`);
+    const from = Object.entries(plan.byCurrent).filter(([, n]) => n).map(([p, n]) => `${n} da «${PROVENANCE_LABELS[p].toLowerCase()}»`).join(', ');
+    preview = plan.values
+      ? `<p><strong>${nValori(plan.values)}</strong> in <strong>${nNotti(plan.nights)}</strong> ${plan.values === 1 ? 'diventerà' : 'diventeranno'} «${PROVENANCE_LABELS[tool.target]}»${from ? ` (${from})` : ''}.</p>`
+      : '<p>Nessun valore da classificare con queste scelte.</p>';
+    if (parts.length) preview += `<p class="muted small">${capitalize(parts.join('; '))}.</p>`;
+    if (plan.values) preview += '<p class="muted small">Nessun valore del diario viene modificato.</p>';
+  }
+  const off = tool.busy || !!plan.error || !plan.values;
+  return `<div class="import-panel prov-panel" id="prov-panel" tabindex="-1" role="region" aria-labelledby="prov-panel-title">
+    <h4 id="prov-panel-title">Classifica l'origine dei dati</h4>
+    ${rangeInputsHTML(tool, 'prov')}
+    <fieldset class="import-mode">
+      <legend>Campi</legend>
+      ${PROVENANCE_GROUPS.map((g) => `<label><input type="checkbox" id="pg-${g.id}" data-group="${g.id}" ${tool.groups.includes(g.id) ? 'checked' : ''}> <span>${g.label}${g.fields.length > 1 ? `<span class="muted small block">${g.fields.map((f) => FIELD_LABELS[f]).join(', ')}</span>` : ''}</span></label>`).join('')}
+    </fieldset>
+    <fieldset class="import-mode">
+      <legend>Origine</legend>
+      ${['transcribed', 'retrospective', 'prospective', 'unknown'].map((p) => `<label><input type="radio" name="prov-target" id="pt-${p}" value="${p}" ${tool.target === p ? 'checked' : ''}> <span>${PROVENANCE_LABELS[p]}${p === 'prospective' ? '<span class="muted small block">Inseriti nell\'app entro un giorno e mezzo dalla notte</span>' : ''}</span></label>`).join('')}
+    </fieldset>
+    <label class="check-row"><input type="checkbox" id="prov-only-unknown" ${tool.onlyUnknown ? 'checked' : ''}> <span>Solo i valori con origine ancora non nota</span></label>
+    <div class="prov-preview" id="prov-preview" aria-live="polite">${preview}</div>
+    ${backupHintHTML()}
+    ${resultHTML(tool)}
+    <div class="import-actions">
+      <button type="button" class="btn-primary" id="prov-apply" aria-disabled="${off}">${tool.busy ? 'Scrittura…' : plan.values ? `Classifica ${nValori(plan.values)}` : 'Classifica'}</button>
+      <button type="button" class="btn-ghost" id="prov-close" ${tool.busy ? 'disabled' : ''}>Chiudi</button>
+    </div>
+  </div>`;
+}
+
+function screenPlan(tool) {
+  if (tool.scope === 'range') return planScreenDate(state.entries, { from: tool.from, to: tool.to, action: tool.action });
+  const r = state.entries[tool.night];
+  if (!r || screenTimeReference(r) == null) return { error: 'Questa notte non ha uno Screen Time.', records: [] };
+  if (!tool.choice) return { error: 'Scegli che cosa indicare.', records: [] };
+  const out = manualScreenDate(r, tool.choice === 'date' ? { kind: 'date', date: tool.day } : { kind: tool.choice });
+  if (out.error) return { error: out.error, records: [] };
+  const same = ['screenTimeDate', 'screenTimeDateStatus', 'screenTimeDateRule'].every((f) => (out.record[f] ?? null) === (r[f] ?? null));
+  return same ? { error: null, records: [], already: 1 } : { error: null, records: [out.record] };
+}
+function screenRefText(r) {
+  const ref = screenTimeReference(r);
+  if (!ref) return 'nessuno Screen Time in questa notte';
+  const how = { entry_label: 'indicato al momento dell\'inserimento', manual_correction: 'corretto a mano', historic_convention_confirmed: 'confermato da te' }[ref.rule] || '';
+  return `Screen time ${formatDuration(r.screenTimeTotal)} · giorno ${SCREEN_STATUS_LABELS[ref.status].toLowerCase()}${ref.date ? `: ${fmtDayLong(ref.date)}` : ''}${ref.status === 'presumed' ? ' (giorno prima del risveglio, non controllato)' : how ? ` (${how})` : ''}`;
+}
+
+function screenPanelHTML(tool) {
+  const plan = screenPlan(tool);
+  let preview;
+  if (plan.error) preview = `<p class="muted small">${plan.error}</p>`;
+  else if (tool.scope === 'range') {
+    const PL = { verified: ['verificata', 'verificate'], presumed: ['presunta', 'presunte'], unknown: ['sconosciuta', 'sconosciute'] };
+    const from = Object.entries(plan.byCurrent).filter(([, n]) => n).map(([st, n]) => `${n} ${PL[st][n === 1 ? 0 : 1]}`).join(', ');
+    const target = { confirm: 'verificato, giorno prima del risveglio', unknown: 'sconosciuto', presumed: 'presunto' }[tool.action];
+    preview = plan.nights ? `<p><strong>${nNotti(plan.nights)}</strong>: il giorno dello Screen Time diventerà ${target}${from ? ` (ora: ${from})` : ''}.</p>` : '<p>Nessuna notte da cambiare con queste scelte.</p>';
+    const notes = [];
+    if (plan.already) notes.push(`${nNotti(plan.already)} già in questo stato`);
+    if (plan.entryLabel) notes.push(`${nNotti(plan.entryLabel)} con il giorno indicato al momento dell'inserimento, ${plan.entryLabel === 1 ? 'esclusa' : 'escluse'}`);
+    if (plan.manual) notes.push(`${nNotti(plan.manual)} ${plan.manual === 1 ? 'corretta a mano, esclusa' : 'corrette a mano, escluse'} (si cambiano una alla volta)`);
+    if (notes.length) preview += `<p class="muted small">${capitalize(notes.join('; '))}.</p>`;
+    if (plan.nights) preview += '<p class="muted small">Il valore dello Screen Time non cambia: cambia solo il giorno a cui è attribuito.</p>';
+  } else {
+    preview = plan.already ? '<p>La notte è già in questo stato.</p>' : `<p>La notte del ${fmtDayLong(tool.night)} verrà aggiornata.</p>`;
+  }
+  const count = plan.records.length;
+  const off = tool.busy || !!plan.error || !count;
+  const r = state.entries[tool.night];
+  let minDay = tool.night;
+  for (let i = 0; i < MANUAL_MAX_DAYS_BEFORE; i++) minDay = addDays(minDay, -1);
+  return `<div class="import-panel prov-panel" id="prov-panel" tabindex="-1" role="region" aria-labelledby="prov-panel-title">
+    <h4 id="prov-panel-title">Giorno dello Screen Time</h4>
+    <p class="muted small">Il totale di Tempo di utilizzo si riferisce a un giorno di calendario. Per le notti inserite prima di questa versione si presume il giorno prima del risveglio, ma non è stato controllato.</p>
+    <div class="segmented seg-2" role="group" aria-label="Notti da modificare">
+      <button type="button" id="scope-range" class="${tool.scope === 'range' ? 'active' : ''}" aria-pressed="${tool.scope === 'range'}">Più notti</button>
+      <button type="button" id="scope-single" class="${tool.scope === 'single' ? 'active' : ''}" aria-pressed="${tool.scope === 'single'}">Una notte</button>
+    </div>
+    ${tool.scope === 'range' ? `
+    ${rangeInputsHTML(tool, 'scr')}
+    <fieldset class="import-mode">
+      <legend>Per queste notti</legend>
+      <label><input type="radio" name="scr-action" id="sa-confirm" value="confirm" ${tool.action === 'confirm' ? 'checked' : ''}> <span>Confermo: è il giorno prima del risveglio</span></label>
+      <label><input type="radio" name="scr-action" id="sa-unknown" value="unknown" ${tool.action === 'unknown' ? 'checked' : ''}> <span>Non so a che giorno si riferisce</span></label>
+      <label><input type="radio" name="scr-action" id="sa-presumed" value="presumed" ${tool.action === 'presumed' ? 'checked' : ''}> <span>Torna a «presunto»</span></label>
+    </fieldset>` : `
+    <label class="prov-field wide"><span>Notte (giorno del risveglio)</span><input type="date" id="scr-night" value="${tool.night}" max="${todayISO()}"></label>
+    <p class="muted small" id="scr-current">${r ? screenRefText(r) : 'Nessun dato salvato per questa notte'}</p>
+    <fieldset class="import-mode">
+      <legend>Lo Screen Time di questa notte si riferisce a</legend>
+      <label><input type="radio" name="scr-choice" id="sc-date" value="date" ${tool.choice === 'date' ? 'checked' : ''}> <span>Questo giorno:</span></label>
+      <label class="prov-field wide indent"><span class="visually-hidden">Giorno dello Screen Time</span><input type="date" id="scr-day" value="${tool.day}" min="${minDay}" max="${tool.night}" ${tool.choice === 'date' ? '' : 'disabled'}></label>
+      <label><input type="radio" name="scr-choice" id="sc-unknown" value="unknown" ${tool.choice === 'unknown' ? 'checked' : ''}> <span>Non lo so</span></label>
+      <label><input type="radio" name="scr-choice" id="sc-presumed" value="presumed" ${tool.choice === 'presumed' ? 'checked' : ''}> <span>Torna a «presunto»</span></label>
+    </fieldset>`}
+    <div class="prov-preview" id="prov-preview" aria-live="polite">${preview}</div>
+    ${backupHintHTML()}
+    ${resultHTML(tool)}
+    <div class="import-actions">
+      <button type="button" class="btn-primary" id="prov-apply" aria-disabled="${off}">${tool.busy ? 'Scrittura…' : count > 1 ? `Aggiorna ${nNotti(count)}` : 'Aggiorna'}</button>
+      <button type="button" class="btn-ghost" id="prov-close" ${tool.busy ? 'disabled' : ''}>Chiudi</button>
+    </div>
+  </div>`;
+}
+
+function attachProvenanceListeners() {
+  const $ = (id) => document.getElementById(id);
+  const open = (mode) => { if (state.demo) return; openProvTool(mode); renderSettings(); const p = $('prov-panel'); if (p) { p.focus({ preventScroll: true }); p.scrollIntoView({ block: 'nearest' }); } };
+  if ($('prov-open')) $('prov-open').addEventListener('click', () => open('prov'));
+  if ($('screen-open')) $('screen-open').addEventListener('click', () => open('screen'));
+  const tool = state.provTool;
+  if (!tool) return;
+  // Ogni nuova scelta toglie l'esito precedente (l'annullamento resta).
+  const update = (fn) => { fn(); tool.result = tool.undo ? tool.result : null; renderSettings(); };
+  const onDate = (id, k) => { const el = $(id); if (el) el.addEventListener('change', () => update(() => { tool[k] = el.value; })); };
+  onDate('prov-from', 'from'); onDate('prov-to', 'to'); onDate('scr-from', 'from'); onDate('scr-to', 'to'); onDate('scr-day', 'day');
+  if ($('scr-night')) $('scr-night').addEventListener('change', (e) => update(() => { tool.night = e.target.value; tool.choice = null; tool.day = ''; }));
+  root.querySelectorAll('[data-group]').forEach((c) => c.addEventListener('change', () => update(() => {
+    tool.groups = c.checked ? [...tool.groups, c.dataset.group] : tool.groups.filter((g) => g !== c.dataset.group);
+  })));
+  root.querySelectorAll('input[name="prov-target"]').forEach((c) => c.addEventListener('change', () => update(() => { tool.target = c.value; })));
+  root.querySelectorAll('input[name="scr-action"]').forEach((c) => c.addEventListener('change', () => update(() => { tool.action = c.value; })));
+  root.querySelectorAll('input[name="scr-choice"]').forEach((c) => c.addEventListener('change', () => update(() => {
+    tool.choice = c.value;
+    if (c.value === 'date' && !tool.day && state.entries[tool.night]) tool.day = (screenTimeReference(state.entries[tool.night]) || {}).date || addDays(tool.night, -1);
+  })));
+  if ($('prov-only-unknown')) $('prov-only-unknown').addEventListener('change', (e) => update(() => { tool.onlyUnknown = e.target.checked; }));
+  ['scope-range', 'scope-single'].forEach((id) => { if ($(id)) $(id).addEventListener('click', () => update(() => { tool.scope = id === 'scope-range' ? 'range' : 'single'; })); });
+  if ($('prov-backup')) $('prov-backup').addEventListener('click', () => { saveBackup(); renderSettings(); });
+  $('prov-close').addEventListener('click', () => { state.provTool = null; renderSettings(); const b = $(tool.mode === 'prov' ? 'prov-open' : 'screen-open'); if (b) b.focus({ preventScroll: true }); });
+  $('prov-apply').addEventListener('click', applyProvTool);
+  if ($('prov-undo')) $('prov-undo').addEventListener('click', undoProvTool);
+}
+
+// Scrive i record in un'unica transazione, rilegge e verifica.
+async function writeVerified(records, allowed) {
+  const before = state.entries;
+  const ok = await importEntries(records);
+  let fresh = null;
+  try { fresh = await getAllEntries(); } catch (e) { fresh = null; }
+  if (fresh) state.entries = fresh;
+  if (!ok) return { ok: false, written: false };
+  if (!fresh) return { ok: false, written: true, problems: ['database non rileggibile'] };
+  const v = verifyOperation(before, fresh, records, allowed);
+  return { ok: v.ok, written: true, problems: v.problems };
+}
+
+async function applyProvTool() {
+  const tool = state.provTool;
+  if (!tool || tool.busy || state.demo) return;
+  // Il piano si ricalcola sui dati attuali al momento della conferma.
+  const plan = tool.mode === 'prov'
+    ? planProvenance(state.entries, { from: tool.from, to: tool.to, fields: fieldsOfGroups(tool.groups), target: tool.target, onlyUnknown: tool.onlyUnknown })
+    : screenPlan(tool);
+  if (plan.error || !plan.records.length) return;
+  const allowed = tool.mode === 'prov' ? 'meta' : 'screen';
+  const previous = plan.records.map((r) => state.entries[r.date]);
+  tool.busy = true; tool.result = null; tool.undo = null;
+  renderSettings();
+  const res = await writeVerified(plan.records, allowed);
+  tool.busy = false;
+  if (res.ok) {
+    const what = tool.mode === 'prov'
+      ? `${nValori(plan.values)} in ${nNotti(plan.nights)} ${plan.values === 1 ? 'classificato' : 'classificati'} come «${PROVENANCE_LABELS[tool.target]}»`
+      : `${nNotti(plan.records.length)} ${plan.records.length === 1 ? 'aggiornata' : 'aggiornate'}`;
+    tool.result = { ok: true, text: `Fatto: ${what}. Il database è stato riletto: ogni notte corrisponde all'anteprima e nessun valore del diario è cambiato.` };
+    tool.undo = { allowed, written: plan.records, previous };
+  } else {
+    tool.result = { ok: false, text: !res.written
+      ? 'Scrittura non riuscita: nessun dato è stato modificato. Riprova.'
+      : `La verifica dopo la scrittura ha trovato differenze (${res.problems.slice(0, 3).join('; ')}). Salva un backup e controlla le notti indicate.` };
+  }
+  renderSettings();
+  restoreFocus('#prov-result');
+}
+
+async function undoProvTool() {
+  const tool = state.provTool;
+  if (!tool || !tool.undo || tool.busy || state.demo) return;
+  const { allowed, written, previous } = tool.undo;
+  // Si annulla solo se le notti sono ancora come le ha lasciate l'operazione.
+  const changed = written.filter((r) => !state.entries[r.date] || !sameRecord(state.entries[r.date], r));
+  if (changed.length) {
+    tool.undo = null;
+    tool.result = { ok: false, text: `Non è più possibile annullare: ${nNotti(changed.length)} ${changed.length === 1 ? 'è stata modificata' : 'sono state modificate'} dopo l'operazione. Puoi comunque riclassificarle.` };
+    renderSettings();
+    return;
+  }
+  tool.busy = true;
+  renderSettings();
+  const res = await writeVerified(previous, allowed);
+  tool.busy = false;
+  tool.undo = null;
+  tool.result = res.ok
+    ? { ok: true, text: `Operazione annullata: ${nNotti(previous.length)} ${previous.length === 1 ? 'è tornata' : 'sono tornate'} esattamente com'erano. Verificato rileggendo il database.` }
+    : { ok: false, text: !res.written ? 'Annullamento non riuscito: nessun dato è stato modificato. Riprova.' : `La verifica dell'annullamento ha trovato differenze (${res.problems.slice(0, 3).join('; ')}).` };
+  renderSettings();
+  restoreFocus('#prov-result');
+}
+
 // ---------- Aggiornamento del database (schermata obbligatoria) ----------
 // Prima di aggiornare lo schema: 1) backup dei dati così come sono, creato
 // e verificato rileggendolo; 2) conferma di averlo salvato; 3) aggiornamento;
@@ -1646,6 +2413,7 @@ function setDemo(on) {
   }
   state.demo = on;
   state.importState = null; // un ripristino non deve mai mescolarsi con la demo
+  state.provTool = null; // né una classificazione dell'origine
   state.confirmPending = false;
   state.saveMsg = { type: '', text: '' };
   state.selectedDate = defaultNight();

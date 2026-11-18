@@ -41,6 +41,7 @@ export const ANALYSIS_CONFIG = Object.freeze({
   REGULARITY_WINDOW_DAYS: 28,
   REGULARITY_MIN_NIGHTS: 14,
   SJL_MIN_NIGHTS_PER_TYPE: 4,
+  REGULARITY_MIN_NIGHTS_PER_TYPE: 7,
 
   // --- Notti insolite (indicazione visiva) ---
   MAD_K: 3,

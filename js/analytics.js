@@ -85,6 +85,19 @@ export function nearestInstant(referenceInstant, timeStr) {
 
 export function minutesBetween(a, b) { return Math.round((b - a) / 60000); }
 
+// Come si legge sull'orologio locale l'istante ottenuto da un orario HH:MM
+// (Fase 4.1). 'nonexistent': l'orario non esiste in quel giorno (passaggio
+// all'ora legale) e JavaScript l'ha spostato; 'ambiguous': lo stesso orario
+// esiste due volte (ritorno all'ora solare) e il modello HH:MM non dice
+// quale delle due occorrenze sia stata registrata. Nessuna delle due viene
+// scelta qui: chi chiama decide di astenersi.
+export function clockReadingStatus(instant, hhmm) {
+  if (nowHHMM(instant) !== hhmm) return 'nonexistent';
+  const same = (d) => todayISO(d) === todayISO(instant) && nowHHMM(d) === hhmm;
+  if (same(new Date(instant.getTime() - 3600000)) || same(new Date(instant.getTime() + 3600000))) return 'ambiguous';
+  return 'ok';
+}
+
 export function formatDuration(mins) {
   if (mins == null) return '—';
   const h = Math.floor(mins / 60), m = mins % 60;
@@ -147,6 +160,21 @@ export function computeNightMetrics(entry, date) {
     effectiveSleepMin: null, effectiveError: null,
     // Schema 4: coerenza tra coricamento, tentativo e addormentamento.
     latencyMin: null, attemptError: null, latencyWarning: null, inBedError: null,
+    // Fase 4 (L0): derivate dai precedenti, nessun nuovo confronto di orari.
+    // latencyAfterUseMin = addormentamento − max(tentativo, ultimo utilizzo)
+    //                    = min(latenza, tempo senza schermo);
+    // screenAfterAttempt = ultimo utilizzo dopo il tentativo (L > T);
+    // inBedBeforeAttemptMin = tentativo − coricamento;
+    // screenAfterInBed = ultimo utilizzo dopo il coricamento (L > C), grezzo:
+    // l'"uso a letto" mostrato dipende anche dalla provenienza
+    // (screenInBedStatus).
+    latencyAfterUseMin: null, screenAfterAttempt: null, inBedBeforeAttemptMin: null, screenAfterInBed: null,
+    // Fase 4.1: tentativo − ultimo utilizzo (negativo = ultimo utilizzo dopo
+    // il tentativo). In tempo reale quando la notte è collocabile (tentativo
+    // coerente, addormentamento e risveglio noti), altrimenti sull'istante
+    // più vicino (±12 h), come gli altri confronti. Non richiede
+    // l'addormentamento: serve a P1.
+    screenToAttemptMin: null,
   };
 
   let bedInstant = null;
@@ -201,6 +229,21 @@ export function computeNightMetrics(entry, date) {
         ? `L'ora in cui sei andato/a a letto (${e.inBedTime}) non può essere dopo quella in cui hai provato a dormire (${e.sleepAttempt}).`
         : `L'ora in cui sei andato/a a letto (${e.inBedTime}) non può essere dopo l'addormentamento (${e.bedtime}).`;
     }
+  }
+
+  if (e.sleepAttempt && e.lastScreenUse) {
+    result.screenToAttemptMin = attemptInstant
+      ? minutesBetween(nearestInstant(attemptInstant, e.lastScreenUse), attemptInstant)
+      : nearestClockDiff(e.lastScreenUse, e.sleepAttempt);
+  }
+  if (result.latencyMin != null && result.screenFreeMin != null) {
+    result.latencyAfterUseMin = Math.min(result.latencyMin, result.screenFreeMin);
+    result.screenAfterAttempt = result.screenFreeMin < result.latencyMin;
+  }
+  if (e.inBedTime && e.bedtime && !result.inBedError) {
+    const bedToOnset = before(e.inBedTime, e.bedtime, bedInstant);
+    if (result.latencyMin != null) result.inBedBeforeAttemptMin = bedToOnset - result.latencyMin;
+    if (result.screenFreeMin != null) result.screenAfterInBed = result.screenFreeMin < bedToOnset;
   }
 
   if (result.durationMin != null && awakeningsKnown(e)) {
@@ -258,6 +301,18 @@ export function dataConfidence(daysWithData, totalDays) {
   return low;
 }
 
+// "Uso a letto" (L > C): determinabile solo se coricamento e ultimo
+// utilizzo hanno entrambi provenienza prospective o transcribed
+// (docs/research/FINAL_DATA_MODEL.md §6). Altrimenti 'undetermined', mai "no".
+export const RECORDED_PROVENANCE = ['prospective', 'transcribed'];
+export function screenInBedStatus(entry, date) {
+  const e = entry || {};
+  if (isEmpty(e.inBedTime) || isEmpty(e.lastScreenUse)) return 'undetermined';
+  if (!RECORDED_PROVENANCE.includes(provenanceOf(e, 'inBedTime')) || !RECORDED_PROVENANCE.includes(provenanceOf(e, 'lastScreenUse'))) return 'undetermined';
+  const m = computeNightMetrics(e, date);
+  return m.screenAfterInBed == null ? 'undetermined' : m.screenAfterInBed ? 'yes' : 'no';
+}
+
 export function dayStatus(entry) {
   if (!entry) return 'missing';
   const ev = eveningComplete(entry), sl = sleepComplete(entry);
@@ -274,7 +329,52 @@ export function dayStatus(entry) {
 // L'esclusione è per campo: una notte con orari anomali esclude durata e
 // tempo senza schermo, ma la sua qualità percepita e il suo screen time
 // (se non anomalo) restano nelle medie.
-export const SUMMARY_METRICS = ['durationMin', 'effectiveSleepMin', 'quality', 'awakenings', 'awakeMinutes', 'screenTimeTotal', 'screenFreeMin'];
+export const SUMMARY_METRICS = ['durationMin', 'effectiveSleepMin', 'quality', 'awakenings', 'awakeMinutes', 'screenTimeTotal', 'screenFreeMin', 'latencyMin', 'latencyAfterUseMin'];
+
+// --- Filtri delle descrizioni (Fase 5, roadmap 5.1) ---
+// Valgono per la panoramica di periodo e per il grafico degli orari, non
+// per la regolarità e per P1–P3, che hanno criteri propri.
+// - dayType: 'all' | 'constrained' | 'free' (le notti senza tipo di giorno
+//   escono quando si filtra);
+// - includeUnusual: false (default) toglie le notti segnate come insolite;
+// - provenance: 'all' (default) | 'recorded': con 'recorded' i valori non
+//   inseriti al momento o ricopiati da note dell'epoca vengono tolti da una
+//   COPIA della notte, solo per il calcolo. I dati salvati non cambiano mai.
+// Restituisce { entries, removed: { dayType, noDayType, unusual, values } }.
+export const DEFAULT_DESCRIPTIVE_FILTERS = Object.freeze({ dayType: 'all', includeUnusual: false, provenance: 'all' });
+export function applyDescriptiveFilters(entries, filters = DEFAULT_DESCRIPTIVE_FILTERS) {
+  const f = { ...DEFAULT_DESCRIPTIVE_FILTERS, ...(filters || {}) };
+  const out = {};
+  const removed = { dayType: 0, noDayType: 0, unusual: 0, values: 0, nightsEmptied: 0 };
+  Object.keys(entries).forEach((date) => {
+    const e = entries[date];
+    if (f.dayType !== 'all') {
+      if (!e.dayType) { removed.noDayType++; return; }
+      if (e.dayType !== f.dayType) { removed.dayType++; return; }
+    }
+    if (!f.includeUnusual && e.unusualNight === true) { removed.unusual++; return; }
+    if (f.provenance === 'recorded') {
+      const copy = { ...e };
+      let n = 0;
+      PROVENANCE_FIELDS.forEach((k) => {
+        if (!isEmpty(copy[k]) && !RECORDED_PROVENANCE.includes(provenanceOf(e, k))) { delete copy[k]; n++; }
+      });
+      // I risvegli valgono in coppia: se ne resta uno solo, si tolgono entrambi.
+      if (isEmpty(copy.awakenings) !== isEmpty(copy.awakeMinutes)) {
+        if (!isEmpty(copy.awakenings)) { delete copy.awakenings; n++; }
+        if (!isEmpty(copy.awakeMinutes)) { delete copy.awakeMinutes; n++; }
+      }
+      removed.values += n;
+      const hasAny = PROVENANCE_FIELDS.some((k) => !isEmpty(copy[k]));
+      if (!hasAny) { removed.nightsEmptied++; return; }
+      out[date] = copy;
+      return;
+    }
+    out[date] = e;
+  });
+  return { entries: out, removed, filters: f };
+}
+export const filtersActive = (f) => !!f && (f.dayType !== 'all' || f.includeUnusual === true || f.provenance !== 'all');
 
 export function periodSummary(entries, endDate, days = 7, { includeOutliers = false } = {}) {
   const dates = [];
@@ -298,6 +398,9 @@ export function periodSummary(entries, endDate, days = 7, { includeOutliers = fa
       effectiveSleepMin: m.effectiveSleepMin,
       awakenings: awakeningsKnown(e) ? e.awakenings : null,
       awakeMinutes: awakeningsKnown(e) ? e.awakeMinutes : null,
+      latencyMin: m.latencyMin,
+      latencyAfterUseMin: m.latencyAfterUseMin,
+      screenAfterAttempt: m.screenAfterAttempt,
       sleepOutlier: !!(e && e.is_outlier_bedtime),
       screenOutlier: !!(e && e.is_outlier_screen_time),
     };
@@ -305,7 +408,7 @@ export function periodSummary(entries, endDate, days = 7, { includeOutliers = fa
     // Il numero e i minuti dei risvegli non dipendono dagli orari: restano
     // anche nelle notti con orari anomali; il sonno effettivo, che dipende
     // dall'intervallo, segue invece la sorte della durata.
-    const skip = { durationMin: night.sleepOutlier, effectiveSleepMin: night.sleepOutlier, screenFreeMin: night.sleepOutlier, screenTimeTotal: night.screenOutlier, quality: false, awakenings: false, awakeMinutes: false };
+    const skip = { durationMin: night.sleepOutlier, effectiveSleepMin: night.sleepOutlier, screenFreeMin: night.sleepOutlier, latencyMin: night.sleepOutlier, latencyAfterUseMin: night.sleepOutlier, screenTimeTotal: night.screenOutlier, quality: false, awakenings: false, awakeMinutes: false };
     const skippedFields = [];
     SUMMARY_METRICS.forEach((k) => {
       if (night[k] == null) return;
@@ -339,7 +442,11 @@ export function periodSummary(entries, endDate, days = 7, { includeOutliers = fa
 
   // Distribuzione della qualità (scala ordinale 1–10): conteggi per valore.
   const qualityCounts = Array.from({ length: 10 }, (_, i) => values.quality.filter((q) => q === i + 1).length);
-  return { dates, days, nights, nightsWithData, coverage: dataConfidence(nightsWithData, days), stats, excluded, best, worst, qualityCounts };
+  // Uso dello schermo dopo il tentativo di dormire: conteggio descrittivo
+  // (stesse esclusioni della latenza).
+  const aa = nights.filter((x) => x.screenAfterAttempt != null && (includeOutliers || !x.sleepOutlier));
+  const afterAttempt = { yes: aa.filter((x) => x.screenAfterAttempt).length, n: aa.length };
+  return { dates, days, nights, nightsWithData, coverage: dataConfidence(nightsWithData, days), stats, excluded, best, worst, qualityCounts, afterAttempt };
 }
 
 // --- Notti pronte per le analisi, con la stessa politica anomalie del
@@ -397,6 +504,8 @@ export function buildCSV(entries) {
     'in_bed_time', 'sleep_attempt', 'day_type', 'day_type_source',
     'late_caffeine', 'alcohol', 'stress', 'unusual_night', 'last_screen_use_source',
     ...PROVENANCE_FIELDS.map((f) => `prov_${f}`),
+    // Fase 4: derivate (stime soggettive), in coda.
+    'estimated_latency_minutes', 'latency_after_last_use_minutes', 'screen_after_attempt',
   ];
   const val = (v) => (v == null ? '' : v);
   const flag = (v) => (v ? 'true' : 'false');
@@ -416,6 +525,7 @@ export function buildCSV(entries) {
       val(e.inBedTime), val(e.sleepAttempt), val(e.dayType), val(e.dayType ? e.dayTypeSource : null),
       tri(e.lateCaffeine), tri(e.alcohol), tri(e.stress), tri(e.unusualNight), val(e.lastScreenUseSource),
       ...PROVENANCE_FIELDS.map((f) => (e[f] == null || e[f] === '' ? '' : provenanceOf(e, f))),
+      val(m.latencyMin), val(m.latencyAfterUseMin), m.screenAfterAttempt == null ? '' : String(m.screenAfterAttempt),
     ].join(',');
   });
   return [header.join(','), ...rows].join('\n');
@@ -443,7 +553,10 @@ export function circularStdMinutes(times) {
   if (!times || times.length === 0) return null;
   const { R } = circularMoments(times);
   if (R <= 1e-4) return null;
-  return Math.sqrt(-2 * Math.log(R)) * (1440 / (2 * Math.PI));
+  // Fase 4.1: R non può superare 1; con valori identici l'errore di
+  // arrotondamento poteva dare R appena sopra 1 e quindi NaN (es. 28 volte
+  // 23:00). Si limita R a 1: SD = 0, il valore corretto.
+  return Math.sqrt(-2 * Math.log(Math.min(1, R))) * (1440 / (2 * Math.PI));
 }
 // Orario medio circolare (HH:MM) o null se non definito.
 export function circularMeanHHMM(times) {
@@ -488,9 +601,42 @@ export function describe(values, days) {
 // --- Regolarità degli orari (ANALYTICS_METHODOLOGY.md §4) ---
 // Finestra di CALENDARIO: le notti con risveglio negli ultimi
 // REGULARITY_WINDOW_DAYS giorni, oggi incluso. Notti usate: addormentamento
-// e risveglio presenti e coerenti; escluse (con il motivo) le anomalie
-// confermate, salvo includeOutliers. Nessun punteggio: due SD in minuti.
-export function regularityForWindow(entries, endDate, { includeOutliers = false } = {}) {
+// e risveglio presenti e coerenti, entrambi con provenienza ammessa (di
+// default prospective o transcribed: le ricostruzioni a memoria tendono a
+// "regolarizzare" gli orari). Escluse, con il motivo: anomalie confermate
+// (salvo includeOutliers), notti insolite, provenienza. Nessun punteggio:
+// SD circolari in minuti; per tipo di giorno; social jetlag.
+// provenance: 'recorded' (prospective + transcribed) oppure 'all'.
+export const PROVENANCE_SETS = {
+  recorded: RECORDED_PROVENANCE,
+  prospective: ['prospective'],
+  all: ['prospective', 'transcribed', 'retrospective', 'unknown'],
+};
+// Differenza circolare con segno b − a in minuti, in (−720, 720].
+export function circularDiffMinutes(aHHMM, bHHMM) {
+  const d = ((hhmmToMinutes(bHHMM) - hhmmToMinutes(aHHMM)) % 1440 + 1440) % 1440;
+  return d > 720 ? d - 1440 : d;
+}
+// Punto medio del sonno (Fase 4.1): istanti reali di addormentamento e
+// risveglio (combineDateTime, resolveBefore), punto medio sulla linea del
+// tempo, riconvertito in ora locale. Così la notte del cambio d'ora non
+// sposta il risultato di un'ora. Se uno dei due orari è inesistente o
+// ripetuto in quel giorno: { time: null, reason }, nessuna stima.
+export function sleepMidpoint(entry, date) {
+  const e = entry || {};
+  if (isEmpty(e.bedtime) || isEmpty(e.wakeTime)) return null;
+  const wake = combineDateTime(date, e.wakeTime, false);
+  const bed = resolveBefore(wake, e.bedtime);
+  for (const [inst, hhmm] of [[bed, e.bedtime], [wake, e.wakeTime]]) {
+    const st = clockReadingStatus(inst, hhmm);
+    if (st !== 'ok') return { time: null, reason: st };
+  }
+  if (wake <= bed) return null;
+  const mid = new Date(Math.round((bed.getTime() + (wake - bed) / 2) / 60000) * 60000);
+  return { time: nowHHMM(mid), reason: null };
+}
+export function regularityForWindow(entries, endDate, { includeOutliers = false, provenance = 'recorded' } = {}) {
+  const allowed = PROVENANCE_SETS[provenance] || RECORDED_PROVENANCE;
   const days = CFG.REGULARITY_WINDOW_DAYS;
   const from = addDays(endDate, -(days - 1));
   const used = [], excluded = [];
@@ -498,16 +644,52 @@ export function regularityForWindow(entries, endDate, { includeOutliers = false 
     const date = addDays(endDate, -i);
     const e = entries[date];
     if (!e || isEmpty(e.bedtime) || isEmpty(e.wakeTime)) continue;
-    if (computeNightMetrics(e, date).durationError) { excluded.push({ date, reason: 'incoherent' }); continue; }
+    const m = computeNightMetrics(e, date);
+    if (m.durationError) { excluded.push({ date, reason: 'incoherent' }); continue; }
     if (e.is_outlier_bedtime && !includeOutliers) { excluded.push({ date, reason: 'outlier' }); continue; }
-    used.push(e);
+    if (e.unusualNight === true) { excluded.push({ date, reason: 'unusual' }); continue; }
+    if (!allowed.includes(provenanceOf(e, 'bedtime')) || !allowed.includes(provenanceOf(e, 'wakeTime'))) { excluded.push({ date, reason: 'provenance' }); continue; }
+    used.push({ e, m, date });
   }
   const n = used.length, min = CFG.REGULARITY_MIN_NIGHTS;
-  const base = { from, to: endDate, days, n, min, excluded };
-  if (n < min) return { shown: false, ...base };
-  const onsets = used.map((e) => e.bedtime), wakes = used.map((e) => e.wakeTime);
+  const base = { from, to: endDate, days, n, min, excluded, provenance };
+  // Social jetlag: punto medio del sonno sulla linea del tempo reale
+  // (sleepMidpoint), media circolare nei giorni liberi meno quella nei
+  // vincolati. Le notti con un orario inesistente o ripetuto per il cambio
+  // dell'ora escono SOLO da questo calcolo, con il motivo (sjl.excluded).
+  const sjlExcluded = [];
+  const withMid = used.filter((u) => u.e.dayType).map((u) => ({ ...u, mid: sleepMidpoint(u.e, u.date) })).filter((u) => {
+    if (u.mid && u.mid.time) return true;
+    if (u.mid && u.mid.reason) sjlExcluded.push({ date: u.date, reason: u.mid.reason === 'ambiguous' ? 'dst_ambiguous' : 'dst_nonexistent' });
+    return false;
+  });
+  const ofMid = (t) => withMid.filter((u) => u.e.dayType === t).map((u) => u.mid.time);
+  const midsFree = ofMid('free'), midsConstrained = ofMid('constrained');
+  const sjlMin = CFG.SJL_MIN_NIGHTS_PER_TYPE;
+  const sjl = { nFree: midsFree.length, nConstrained: midsConstrained.length, min: sjlMin, excluded: sjlExcluded, shown: midsFree.length >= sjlMin && midsConstrained.length >= sjlMin };
+  if (sjl.shown) {
+    sjl.midFree = circularMeanHHMM(midsFree);
+    sjl.midConstrained = circularMeanHHMM(midsConstrained);
+    sjl.minutes = sjl.midFree && sjl.midConstrained ? circularDiffMinutes(sjl.midConstrained, sjl.midFree) : null;
+    if (sjl.minutes == null) sjl.shown = false;
+  }
+  // Variabilità per tipo di giorno (soglia per tipo, vedi §12).
+  const typeMin = CFG.REGULARITY_MIN_NIGHTS_PER_TYPE;
+  const ofType = (t) => used.filter((u) => u.e.dayType === t);
+  const free = ofType('free'), constrained = ofType('constrained');
+  const byType = Object.fromEntries([['constrained', constrained], ['free', free]].map(([t, list]) => [t, {
+    n: list.length, min: typeMin, shown: list.length >= typeMin,
+    sdOnset: list.length >= typeMin ? circularStdMinutes(list.map((u) => u.e.bedtime)) : null,
+    sdWake: list.length >= typeMin ? circularStdMinutes(list.map((u) => u.e.wakeTime)) : null,
+  }]));
+  // Tentativo di dormire: stesse notti, con il tentativo presente, coerente
+  // e con provenienza ammessa.
+  const attempts = used.filter(({ e, m }) => e.sleepAttempt && !m.attemptError && allowed.includes(provenanceOf(e, 'sleepAttempt'))).map(({ e }) => e.sleepAttempt);
+  const attempt = { n: attempts.length, min, shown: attempts.length >= min, sd: attempts.length >= min ? circularStdMinutes(attempts) : null, mean: attempts.length >= min ? circularMeanHHMM(attempts) : null };
+  if (n < min) return { shown: false, ...base, sjl, byType, attempt };
+  const onsets = used.map((u) => u.e.bedtime), wakes = used.map((u) => u.e.wakeTime);
   return {
-    shown: true, ...base,
+    shown: true, ...base, sjl, byType, attempt,
     sdOnset: circularStdMinutes(onsets), sdWake: circularStdMinutes(wakes),
     meanOnset: circularMeanHHMM(onsets), meanWake: circularMeanHHMM(wakes),
   };

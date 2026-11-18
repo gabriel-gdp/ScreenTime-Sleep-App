@@ -9,7 +9,7 @@
 // vecchie, come per i dati storici) e due anomalie confermate, per mostrare come il
 // tool le tratta. Le notti recenti hanno anche i campi dello schema 4
 // (tentativo di dormire, tipo di giorno, indicatori, provenienza
-// "prospective"); le 15 più vecchie no, come i dati storici reali
+// "prospective", a volte l'ora di coricamento); le 15 più vecchie no, come i dati storici reali
 // (provenienza sconosciuta, giorno dello Screen Time presunto).
 // Non rappresentano dati reali di nessuno.
 import { addDays, pad, sleepComplete } from './analytics.js';
@@ -27,12 +27,15 @@ function mulberry32(seed) {
 const toHHMM = (mins) => { const m = ((Math.round(mins) % 1440) + 1440) % 1440; return `${pad(Math.floor(m / 60))}:${pad(m % 60)}`; };
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
-export function generateDemoEntries(today, nights = 60, seed = 20261103) {
+export const DEMO_NIGHTS = 150;
+export function generateDemoEntries(today, nights = DEMO_NIGHTS, seed = 20261103) {
   const rand = mulberry32(seed);
   // Flusso separato per i risvegli: non cambia gli altri valori della demo.
   const randAw = mulberry32(seed + 1);
   // Flusso separato anche per i campi dello schema 4.
   const randS = mulberry32(seed + 2);
+  // E per l'ora di coricamento (facoltativa, presente in circa 4 notti su 10).
+  const randB = mulberry32(seed + 3);
   const gauss = () => (rand() + rand() + rand() - 1.5) * 1.15; // ≈ N(0,1), limitata
   const entries = {};
 
@@ -74,6 +77,8 @@ export function generateDemoEntries(today, nights = 60, seed = 20261103) {
       const useAfter = sr[0] < 0.25 && screenFree <= 60;
       const attemptMin = useAfter ? bedMin - screenFree - (5 + Math.round(sr[1] * 15)) : bedMin - Math.round(5 + sr[1] * Math.min(25, screenFree - 1));
       e.sleepAttempt = toHHMM(attemptMin);
+      const b = [randB(), randB()];
+      if (b[0] < 0.4) e.inBedTime = toHHMM(attemptMin - (5 + Math.round(b[1] * 35)));
       e.dayType = templateDayType(date);
       e.dayTypeSource = sr[2] < 0.8 ? 'template' : 'confirmed';
       CONTEXT_FIELDS.forEach((f, k) => {
@@ -90,7 +95,7 @@ export function generateDemoEntries(today, nights = 60, seed = 20261103) {
       e.lastScreenUseSource = sr[0] < 0.5 ? 'button' : 'manual';
     }
     if (r > 0.95) { // solo sera
-      ['bedtime', 'wakeTime', 'quality', 'awakenings', 'awakeMinutes', 'sleepAttempt', 'dayType', 'dayTypeSource', 'contextDefs', ...CONTEXT_FIELDS].forEach((f) => delete e[f]);
+      ['bedtime', 'wakeTime', 'quality', 'awakenings', 'awakeMinutes', 'sleepAttempt', 'inBedTime', 'dayType', 'dayTypeSource', 'contextDefs', ...CONTEXT_FIELDS].forEach((f) => delete e[f]);
     } else if (r > 0.92) { // solo mattina
       ['screenTimeTotal', 'lastScreenUse', 'screenTimeDate', 'screenTimeDateStatus', 'screenTimeDateRule', 'lastScreenUseSource'].forEach((f) => delete e[f]);
     }
