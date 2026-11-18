@@ -1,18 +1,19 @@
-import { getAllEntries, saveEntry, deleteEntry, importEntries, getPref, setPref, SCHEMA_VERSION, migrateRecords } from './db.js';
+import { getAllEntries, saveEntry, deleteEntry, importEntries, getPref, setPref, SCHEMA_VERSION, migrateRecords, inspectDatabase } from './db.js';
 import { buildBackup, backupFilename, parseBackup, planImport, sameRecord, downloadFile, MAX_BACKUP_BYTES } from './backup.js';
 import {
   pad, todayISO, addDays, nowHHMM, computeNightMetrics, dayStatus,
   daysInMonth, firstWeekdayOfMonth, WEEKDAY_LABELS, downloadCSV, formatDuration,
   minutesToHHMM, hhmmToMinutes,
-  analysisNights, consistencyForWindow, correlationResults, optimalZone,
-  CONSISTENCY_MIN_NIGHTS, OPTIMAL_MIN_TOTAL, OPTIMAL_MIN_GROUP,
+  periodSummary, regularityForWindow,
   bedtimeRangeWarning, wakeTimeRangeWarning, screenTimeTotalWarning,
-  eveningComplete, sleepComplete, eveningStarted, sleepStarted, weeklyComparison, MIN_N_FOR_DELTA,
+  eveningComplete, sleepComplete, eveningStarted, sleepStarted,
 } from './analytics.js';
+import { ANALYSIS_CONFIG as CFG } from './config.js';
 import { generateDemoEntries } from './demo.js';
 import {
   EMPTY_DRAFT, draftFromRecord, draftToRecord, sameData, hasData, parseIntInput,
   awakeningsDraftError, awakeningsUnknownHistoric, AWAKENINGS_MAX, AWAKE_MINUTES_MAX,
+  CONTEXT_FIELDS, DAY_TYPES, lateChangedFields, withMeta,
 } from './record.js';
 
 const svg = (inner, extra = '') => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" ${extra}>${inner}</svg>`;
@@ -68,16 +69,58 @@ const state = {
   realEntries: null,
   realDrafts: null,
   includeOutliers: false,
+  // Periodo del riepilogo in Andamento (7, 28 o 90 notti): preferenza locale.
+  period: [7, 28, 90].includes(Number(getPref('trend_period', '7'))) ? Number(getPref('trend_period', '7')) : 7,
   // Ripristino da backup in corso: null, { error }, { records, meta, mode,
   // confirm, busy } oppure { done, ok, text }.
   importState: null,
+  // Schema settimanale dei giorni vincolati/liberi (indice = giorno della
+  // settimana del risveglio, 0 = domenica) e definizioni dei chip.
+  dayTemplate: readTemplate(),
+  contextDefs: {
+    lateCaffeineFrom: readTimePref('late_caffeine_from', CFG.LATE_CAFFEINE_FROM),
+    alcoholFrom: readTimePref('alcohol_from', CFG.ALCOHOL_FROM),
+  },
+  // Aggiornamento del database in attesa (schermata con backup verificato).
+  migration: null,
+  // Dati inseriti oltre la finestra di tempestività: domanda sull'origine.
+  askProvenance: false,
 };
+function readTemplate() {
+  try {
+    const t = JSON.parse(getPref('daytype_template', 'null'));
+    if (Array.isArray(t) && t.length === 7 && t.every((v) => DAY_TYPES.includes(v))) return t;
+  } catch (e) { /* valore non valido: si usa lo schema iniziale */ }
+  return [...CFG.DEFAULT_DAYTYPE_TEMPLATE];
+}
+function readTimePref(key, fallback) {
+  const v = getPref(key, fallback);
+  return /^([01]\d|2[0-3]):[0-5]\d$/.test(v) ? v : fallback;
+}
 
 const root = document.getElementById('app');
 applyTheme(state.theme);
 
 async function init() {
   window.__sslBooted = true; // vedi controllo di avvio in index.html
+  // Prima di aprire il database alla versione attuale si controlla se
+  // serve un aggiornamento: in quel caso si chiede un backup verificato e
+  // si confrontano i dati prima e dopo (vedi renderMigration).
+  try {
+    const info = await inspectDatabase();
+    if (info.needsUpgrade) {
+      state.migration = { fromVersion: info.version, before: info.records, step: 'backup', backupOk: false, saved: false };
+      state.loaded = true;
+      render();
+      return;
+    }
+  } catch (e) {
+    console.error('Controllo della versione del database non riuscito', e);
+  }
+  await startApp();
+}
+
+async function startApp() {
   try {
     state.entries = await getAllEntries();
   } catch (e) {
@@ -115,7 +158,11 @@ function restoreDrafts() {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !d || typeof d !== 'object') return;
     const draft = { ...EMPTY_DRAFT };
     if (typeof d.screenTimeTotal === 'number' && d.screenTimeTotal >= 0 && d.screenTimeTotal < 1440) draft.screenTimeTotal = d.screenTimeTotal;
-    ['lastScreenUse', 'bedtime', 'wakeTime'].forEach((f) => { if (typeof d[f] === 'string' && /^\d{2}:\d{2}$/.test(d[f])) draft[f] = d[f]; });
+    ['lastScreenUse', 'bedtime', 'wakeTime', 'inBedTime', 'sleepAttempt'].forEach((f) => { if (typeof d[f] === 'string' && /^\d{2}:\d{2}$/.test(d[f])) draft[f] = d[f]; });
+    if (DAY_TYPES.includes(d.dayType)) { draft.dayType = d.dayType; draft.dayTypeSource = d.dayTypeSource === 'template' ? 'template' : 'confirmed'; }
+    else if (d.dayType === null) { draft.dayType = null; draft.dayTypeSource = null; }
+    CONTEXT_FIELDS.forEach((f) => { if (typeof d[f] === 'boolean' || d[f] === null) draft[f] = d[f]; });
+    if (d.lastScreenUseSource === 'button' || d.lastScreenUseSource === 'manual') draft.lastScreenUseSource = d.lastScreenUseSource;
     if (Number.isInteger(d.quality) && d.quality >= 1 && d.quality <= 10) draft.quality = d.quality;
     if (d.awakeningsOn === true || d.awakeningsOn === false || d.awakeningsOn === null) draft.awakeningsOn = d.awakeningsOn;
     if (Number.isInteger(d.awakenings) && d.awakenings >= 1 && d.awakenings <= AWAKENINGS_MAX) draft.awakenings = d.awakenings;
@@ -191,12 +238,12 @@ function defaultNight() {
 
 // ---------- Bozze ----------
 function draftFor(date) {
-  if (!state.drafts[date]) state.drafts[date] = draftFromRecord(state.entries[date]);
+  if (!state.drafts[date]) state.drafts[date] = draftFromRecord(state.entries[date], date, state.dayTemplate);
   return state.drafts[date];
 }
 // Il record che si salverebbe ora: è anche quello usato per i calcoli
 // mostrati a schermo, così anteprima e dato salvato coincidono.
-const draftRecord = (date) => draftToRecord(draftFor(date), state.entries[date], date);
+const draftRecord = (date) => draftToRecord(draftFor(date), state.entries[date], date, state.contextDefs);
 // L'utente ha svuotato tutti i campi di una notte già salvata: salvare
 // significa eliminarla, e va detto esplicitamente (e confermato).
 function isDeletion(date) {
@@ -220,10 +267,13 @@ function validate(date) {
   // Con i risvegli non validi il sonno effettivo non ha senso: si mostra
   // solo l'errore dei risvegli, non un secondo messaggio derivato.
   if (awErr) m = { ...m, effectiveSleepMin: null, effectiveError: null };
-  const errors = [m.durationError, m.screenFreeError, m.effectiveError, awErr && awErr.text].filter(Boolean);
+  const errors = [m.durationError, m.screenFreeError, m.attemptError, m.inBedError, m.effectiveError, awErr && awErr.text].filter(Boolean);
   const sleepWarnings = [m.durationWarning, m.screenFreeWarning, bedW, wakeW].filter(Boolean);
   const screenWarnings = [screenW].filter(Boolean);
-  return { d, record, m, awErr, bedW, wakeW, screenW, errors, sleepWarnings, screenWarnings, warnings: [...screenWarnings, ...sleepWarnings] };
+  // Da confermare ma senza segnare la notte come anomala (una latenza
+  // lunga può essere reale: non deve escludere la notte dalle analisi).
+  const confirmOnly = [m.latencyWarning].filter(Boolean);
+  return { d, record, m, awErr, bedW, wakeW, screenW, errors, sleepWarnings, screenWarnings, confirmOnly, warnings: [...screenWarnings, ...sleepWarnings, ...confirmOnly] };
 }
 
 // ---------- Etichette ----------
@@ -443,6 +493,89 @@ function attachAwakeningsListeners(d) {
   if ($('aw-inc')) $('aw-inc').addEventListener('click', () => step(1));
 }
 
+// ---------- Schema 4: coricamento, tipo di giorno, indicatori, origine ----------
+// Coricamento: facoltativo e compresso, per non allungare il check-in.
+function inBedHTML(d) {
+  if (isEmpty(d.inBedTime) && !state.showInBed) {
+    return `<div class="row-note"><button type="button" class="link-btn" id="inbed-add">+ Aggiungi l'ora in cui sei andato/a a letto</button></div>`;
+  }
+  return timeRow({ id: 'f-inbed', label: 'Sei andato/a a letto alle', help: 'Facoltativo: quando ti sei messo/a a letto', value: d.inBedTime });
+}
+
+function dayTypeHTML(d) {
+  return `
+    <div class="ctx-block" role="group" aria-labelledby="daytype-label">
+      <p class="quality-label" id="daytype-label">Stamattina avevi un orario vincolato?<span class="row-help">Lavoro, studio, appuntamento, sveglia obbligata</span></p>
+      <div class="segmented seg-2">
+        <button type="button" data-daytype="constrained" aria-pressed="false">Sì, vincolato</button>
+        <button type="button" data-daytype="free" aria-pressed="false">No, libero</button>
+      </div>
+      <p class="muted small" id="daytype-note"></p>
+    </div>`;
+}
+
+const CONTEXT_UI = [
+  { f: 'lateCaffeine', label: () => `Caffeina dopo le ${state.contextDefs.lateCaffeineFrom}`, help: 'Caffè, tè, bevande energetiche o cola' },
+  { f: 'alcohol', label: () => `Alcol dalle ${state.contextDefs.alcoholFrom}`, help: 'Almeno una bevanda alcolica fino a quando hai provato a dormire' },
+  { f: 'stress', label: () => 'Giornata più stressante del solito', help: 'Rispetto alle tue giornate abituali' },
+  { f: 'unusualNight', label: () => 'Notte insolita', help: 'Malattia o sintomi, farmaci insoliti, viaggio o fuso orario, turno notturno, disturbo esterno, evento eccezionale. Viene esclusa dalle analisi, mai cancellata.' },
+];
+function contextHTML(d) {
+  const any = CONTEXT_FIELDS.some((f) => typeof d[f] === 'boolean');
+  return `
+    <details class="ctx-details" id="ctx-details" ${any || state.ctxOpen ? 'open' : ''}>
+      <summary>Ieri e stanotte <span class="muted small" id="ctx-count"></span></summary>
+      <p class="muted small">Facoltativo. Tocca di nuovo una risposta per tornare a "non indicato": una risposta mancante non vale come "no".</p>
+      ${CONTEXT_UI.map((c) => `
+        <div class="ctx-row" role="group" aria-labelledby="ctx-${c.f}">
+          <p class="ctx-label" id="ctx-${c.f}">${c.label()}<span class="row-help">${c.help}</span></p>
+          <div class="ctx-btns">
+            <button type="button" class="btn-chip" data-ctx="${c.f}" data-val="yes" aria-pressed="false">Sì</button>
+            <button type="button" class="btn-chip" data-ctx="${c.f}" data-val="no" aria-pressed="false">No</button>
+          </div>
+        </div>`).join('')}
+    </details>`;
+}
+
+function provenanceAskHTML() {
+  return `
+    <div class="prov-ask" role="group" aria-labelledby="prov-ask-title">
+      <p class="prov-title" id="prov-ask-title">Stai inserendo dati di più di ${CFG.PROSPECTIVE_WINDOW_HOURS} ore fa. Da dove vengono?</p>
+      <p class="muted small">Serve a distinguere le registrazioni dell'epoca da quelle ricostruite. Riguarda solo i campi che hai cambiato ora.</p>
+      <div class="prov-btns">
+        <button type="button" class="btn-ghost" data-prov="transcribed">Da una nota scritta all'epoca</button>
+        <button type="button" class="btn-ghost" data-prov="retrospective">Ricostruiti a memoria</button>
+        <button type="button" class="btn-ghost" data-prov="unknown">Non so</button>
+      </div>
+    </div>`;
+}
+
+function attachSchema4Listeners(d) {
+  const add = document.getElementById('inbed-add');
+  if (add) add.addEventListener('click', () => { state.showInBed = true; renderToday(); restoreFocus('#f-inbed'); });
+  root.querySelectorAll('[data-daytype]').forEach((b) => b.addEventListener('click', () => {
+    const v = b.dataset.daytype;
+    // Toccare la scelta già confermata la toglie (torna "non indicato").
+    if (d.dayType === v && d.dayTypeSource === 'confirmed') { d.dayType = null; d.dayTypeSource = null; }
+    else { d.dayType = v; d.dayTypeSource = 'confirmed'; }
+    onDraftEdit();
+  }));
+  root.querySelectorAll('[data-ctx]').forEach((b) => b.addEventListener('click', () => {
+    const f = b.dataset.ctx, v = b.dataset.val === 'yes';
+    d[f] = d[f] === v ? null : v;
+    onDraftEdit();
+  }));
+  const det = document.getElementById('ctx-details');
+  if (det) det.addEventListener('toggle', () => { state.ctxOpen = det.open; });
+  root.querySelector('#provenance-ask').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-prov]');
+    if (!b) return;
+    state.provenanceAnswer = b.dataset.prov;
+    state.askProvenance = false;
+    onSave();
+  });
+}
+
 function renderToday() {
   const key = focusKey();
   const date = state.selectedDate;
@@ -480,6 +613,8 @@ function renderToday() {
         <span class="part-status" id="sleep-status"></span>
       </div>
       ${future ? `<p class="placeholder">${ICONS.moon}<span>Questa parte si compila domani mattina, quando ti svegli.</span></p>` : `
+        ${inBedHTML(d)}
+        ${timeRow({ id: 'f-attempt', label: 'Hai provato a dormire alle', help: 'Quando hai smesso di fare altro, telefono compreso', value: d.sleepAttempt })}
         ${timeRow({ id: 'f-bedtime', label: 'Ti sei addormentato/a alle', value: d.bedtime })}
         ${timeRow({ id: 'f-waketime', label: 'Ti sei svegliato/a alle', value: d.wakeTime })}
         ${awakeningsHTML(d, date)}
@@ -490,11 +625,14 @@ function renderToday() {
               <button type="button" class="quality-btn" data-q="${n}" role="radio" aria-checked="false" tabindex="-1" aria-label="${n} su 10${n === 1 ? ', pessima' : n === 10 ? ', ottima' : ''}">${n}</button>`).join('')}
           </div>
           <div class="quality-scale" aria-hidden="true"><span>1 · pessima</span><span>10 · ottima</span></div>
-        </div>`}
+        </div>
+        ${dayTypeHTML(d)}
+        ${contextHTML(d)}`}
     </section>
 
     <section class="summary" id="summary"></section>
 
+    <div id="provenance-ask"></div>
     <button type="button" class="btn-primary" id="save-btn" aria-describedby="save-status"></button>
     <p class="save-status" id="save-status" role="status"></p>
     <p class="visually-hidden" id="live-errors" role="alert"></p>
@@ -537,14 +675,19 @@ function summaryHTML(v) {
   const msgs = [
     m.durationError && msgHTML(m.durationError, 'error', 'err-duration'),
     m.screenFreeError && msgHTML(m.screenFreeError, 'error', 'err-screenfree'),
+    m.attemptError && msgHTML(m.attemptError, 'error', 'err-attempt'),
+    m.inBedError && msgHTML(m.inBedError, 'error', 'err-inbed'),
     m.effectiveError && msgHTML(m.effectiveError, 'error', 'err-effective'),
     m.durationWarning && msgHTML(m.durationWarning, 'warn', 'warn-duration'),
     m.screenFreeWarning && msgHTML(m.screenFreeWarning, 'warn', 'warn-screenfree'),
+    m.latencyWarning && msgHTML(m.latencyWarning, 'warn', 'warn-latency'),
   ].filter(Boolean);
   if (state.confirmPending && isDeletion(state.selectedDate)) {
     msgs.push(msgHTML('Hai svuotato tutti i campi. Confermando, i dati salvati di questa notte vengono eliminati dal dispositivo.', 'warn'));
   } else if (state.confirmPending && v.warnings.length && !v.errors.length) {
-    msgs.push(msgHTML('Alcuni valori sembrano insoliti. Se sono corretti, tocca di nuovo il pulsante per salvarli comunque: verranno segnati come anomalie, non modificati.', 'info'));
+    msgs.push(msgHTML(v.sleepWarnings.length || v.screenWarnings.length
+      ? 'Alcuni valori sembrano insoliti. Se sono corretti, tocca di nuovo il pulsante per salvarli comunque: verranno segnati come anomalie, non modificati.'
+      : 'Se il valore è corretto, tocca di nuovo il pulsante per salvarlo.', 'info'));
   }
   return `
     <div class="stat-grid">
@@ -584,7 +727,9 @@ function updateTodayDerived() {
 
   const invalid = {
     'f-lastuse': !!m.screenFreeError,
-    'f-bedtime': !!(m.screenFreeError || m.durationError),
+    'f-inbed': !!m.inBedError,
+    'f-attempt': !!(m.attemptError || m.inBedError),
+    'f-bedtime': !!(m.screenFreeError || m.durationError || m.attemptError),
     'f-waketime': !!m.durationError,
   };
   Object.entries(invalid).forEach(([id, bad]) => {
@@ -594,7 +739,8 @@ function updateTodayDerived() {
     document.getElementById(`${id}-field`).classList.toggle('is-invalid', bad);
   });
   [['f-screentime', 'duration', d.screenTimeTotal], ['f-lastuse', 'clock', d.lastScreenUse],
-    ['f-bedtime', 'clock', d.bedtime], ['f-waketime', 'clock', d.wakeTime]].forEach(([id, kind, value]) => {
+    ['f-bedtime', 'clock', d.bedtime], ['f-waketime', 'clock', d.wakeTime],
+    ['f-attempt', 'clock', d.sleepAttempt], ['f-inbed', 'clock', d.inBedTime]].forEach(([id, kind, value]) => {
     const el = document.getElementById(`${id}-display`);
     if (!el) return;
     const disp = timeDisplay(kind, value);
@@ -607,7 +753,9 @@ function updateTodayDerived() {
   const describedBy = {
     'f-screentime': ['f-screentime-msg'],
     'f-lastuse': ['err-screenfree', 'warn-screenfree'],
-    'f-bedtime': ['f-bedtime-msg', 'err-duration', 'err-screenfree', 'warn-duration', 'warn-screenfree'],
+    'f-inbed': ['err-inbed'],
+    'f-attempt': ['err-attempt', 'err-inbed', 'warn-latency'],
+    'f-bedtime': ['f-bedtime-msg', 'err-duration', 'err-screenfree', 'err-attempt', 'warn-duration', 'warn-screenfree', 'warn-latency'],
     'f-waketime': ['f-waketime-msg', 'err-duration', 'warn-duration'],
   };
   Object.entries(describedBy).forEach(([id, ids]) => {
@@ -632,6 +780,17 @@ function updateTodayDerived() {
     b.tabIndex = (d.quality == null ? Number(b.dataset.q) === 1 : on) ? 0 : -1;
   });
 
+  // Tipo di giorno e indicatori: stato dei pulsanti (aria-pressed).
+  root.querySelectorAll('[data-daytype]').forEach((b) => b.setAttribute('aria-pressed', String(d.dayType === b.dataset.daytype)));
+  const dtNote = $('#daytype-note');
+  if (dtNote) dtNote.textContent = d.dayType && d.dayTypeSource === 'template' ? 'Proposto dal tuo schema settimanale: tocca per correggerlo.' : d.dayType ? '' : 'Non indicato';
+  root.querySelectorAll('[data-ctx]').forEach((b) => b.setAttribute('aria-pressed', String(d[b.dataset.ctx] === (b.dataset.val === 'yes'))));
+  const ctxCount = $('#ctx-count');
+  if (ctxCount) { const n = CONTEXT_FIELDS.filter((f) => typeof d[f] === 'boolean').length; ctxCount.textContent = n ? `${n} su 4 indicati` : 'facoltativo'; }
+  // Domanda sull'origine dei dati inseriti in ritardo.
+  const ask = $('#provenance-ask');
+  if (ask) ask.innerHTML = state.askProvenance && !v.errors.length ? provenanceAskHTML() : '';
+
   $('#evening-status').innerHTML = partStatusHTML(eveningComplete(d), eveningStarted(d));
   $('#sleep-status').innerHTML = partStatusHTML(sleepComplete(d), sleepStarted(d), future ? 'Domani' : '');
 
@@ -649,7 +808,8 @@ function updateTodayDerived() {
   btn.className = 'btn-primary';
   let off = false;
   if (state.saving) { btn.textContent = 'Salvataggio…'; off = true; }
-  else if (v.errors.length) { btn.textContent = v.awErr && !m.durationError && !m.screenFreeError ? (v.awErr.missing ? 'Completa i risvegli per salvare' : 'Correggi i risvegli per salvare') : 'Correggi i dati per salvare'; off = true; }
+  else if (v.errors.length) { btn.textContent = v.awErr && !m.durationError && !m.screenFreeError && !m.attemptError && !m.inBedError ? (v.awErr.missing ? 'Completa i risvegli per salvare' : 'Correggi i risvegli per salvare') : 'Correggi i dati per salvare'; off = true; }
+  else if (state.askProvenance) { btn.textContent = 'Scegli da dove vengono i dati'; off = true; }
   else if (!dirty) {
     if (saved) { btn.innerHTML = `${ICONS.check}<span>Salvato</span>`; btn.classList.add('is-saved'); }
     else btn.textContent = 'Salva';
@@ -668,6 +828,8 @@ function updateTodayDerived() {
 
 function onDraftEdit() {
   state.confirmPending = false;
+  state.askProvenance = false;
+  state.provenanceAnswer = null;
   state.saveMsg = { type: '', text: '' };
   persistDrafts();
   updateTodayDerived();
@@ -677,7 +839,10 @@ function onDraftEdit() {
 
 function selectNight(date) {
   state.selectedDate = date;
+  state.showInBed = false;
   state.confirmPending = false;
+  state.askProvenance = false;
+  state.provenanceAnswer = null;
   state.saveMsg = { type: '', text: '' };
   if (state.tab !== 'today') setTab('today'); else renderToday();
 }
@@ -694,13 +859,16 @@ function attachTodayListeners() {
     el.addEventListener('change', handler);
   };
   bind('f-screentime', (v) => { d.screenTimeTotal = hhmmToMinutes(v); });
-  bind('f-lastuse', (v) => { d.lastScreenUse = v; });
+  bind('f-lastuse', (v) => { d.lastScreenUse = v; d.lastScreenUseSource = v ? 'manual' : null; });
+  bind('f-attempt', (v) => { d.sleepAttempt = v; });
+  bind('f-inbed', (v) => { d.inBedTime = v; });
   bind('f-bedtime', (v) => { d.bedtime = v; });
   bind('f-waketime', (v) => { d.wakeTime = v; });
 
   const nowBtn = document.getElementById('lastuse-now');
   if (nowBtn) nowBtn.addEventListener('click', () => {
     d.lastScreenUse = nowHHMM();
+    d.lastScreenUseSource = 'button';
     document.getElementById('f-lastuse').value = d.lastScreenUse;
     onDraftEdit();
   });
@@ -724,6 +892,7 @@ function attachTodayListeners() {
   });
 
   attachAwakeningsListeners(d);
+  attachSchema4Listeners(d);
   document.getElementById('save-btn').addEventListener('click', onSave);
 
   const dismissBtn = document.getElementById('dismiss-reminder');
@@ -753,8 +922,20 @@ async function onSave() {
 
   // Si salva esattamente ciò che è visibile a schermo; i campi vuoti
   // restano assenti (mai convertiti in 0 o stimati).
-  const record = { ...v.record };
+  let record = { ...v.record };
   const withData = hasData(record);
+  // Provenienza: i campi inseriti o modificati oltre la finestra di
+  // tempestività richiedono una risposta sull'origine (una volta sola).
+  const now = new Date();
+  if (withData && lateChangedFields(record, state.entries[date], now).length && !state.provenanceAnswer) {
+    state.askProvenance = true;
+    updateTodayDerived();
+    const first = document.querySelector('#provenance-ask button');
+    if (first) first.focus();
+    return;
+  }
+  if (withData) record = withMeta(record, state.entries[date], now, state.provenanceAnswer);
+  state.askProvenance = false;
   if (withData) {
     record.is_outlier_bedtime = v.sleepWarnings.length > 0;
     record.outlier_acknowledged_bedtime = record.is_outlier_bedtime;
@@ -769,7 +950,9 @@ async function onSave() {
   state.saving = false;
   // Se il salvataggio fallisce, la conferma già data resta valida: il
   // tentativo successivo salva direttamente, senza chiederla di nuovo.
-  if (ok) state.confirmPending = false;
+  // Anche la risposta sull'origine resta valida finché il salvataggio non
+  // riesce: si azzera solo a salvataggio completato.
+  if (ok) { state.confirmPending = false; state.provenanceAnswer = null; }
 
   if (ok) {
     const next = { ...state.entries };
@@ -797,170 +980,189 @@ const shortRange = (dates) => {
 };
 const nightShort = (date) => `${weekdayShort(addDays(date, -1))}–${weekdayShort(date)} ${dayNum(addDays(date, -1))}→${dayNum(date)}`;
 
+// Riepilogo di periodo (ANALYTICS_METHODOLOGY.md §5): mediana, intervallo
+// interquartile (IQR), minimo–massimo, numero di notti e copertura. Nessun
+// confronto con frecce tra periodi e nessuna media "di sintesi".
+const PERIODS = [7, 28, 90];
+const fmtDur = (v) => formatDuration(Math.round(v));
 const METRIC_UI = {
-  durationMin: { label: 'Intervallo di sonno medio', fmt: (v) => formatDuration(Math.round(v)), range: (v) => formatDuration(v), delta: (d) => signedDuration(d) },
-  effectiveSleepMin: { label: 'Sonno effettivo stimato', fmt: (v) => formatDuration(Math.round(v)), range: (v) => formatDuration(v), delta: (d) => signedDuration(d) },
-  awakenings: { label: 'Risvegli per notte', fmt: (v) => v.toFixed(1), range: (v) => String(v), delta: (d) => (Math.abs(d) < 0.05 ? null : `${d > 0 ? '+' : '−'}${Math.abs(d).toFixed(1)}`) },
-  quality: { label: 'Qualità media', fmt: (v) => `${v.toFixed(1)}<small>/10</small>`, range: (v) => String(v), delta: (d) => (Math.abs(d) < 0.05 ? null : `${d > 0 ? '+' : '−'}${Math.abs(d).toFixed(1)}`) },
-  screenTimeTotal: { label: 'Screen time medio', fmt: (v) => formatDuration(Math.round(v)), range: (v) => formatDuration(v), delta: (d) => signedDuration(d) },
-  screenFreeMin: { label: 'Senza schermo prima di dormire', fmt: (v) => formatDuration(Math.round(v)), range: (v) => formatDuration(v), delta: (d) => signedDuration(d) },
+  durationMin: { label: 'Intervallo di sonno', fmt: fmtDur },
+  effectiveSleepMin: { label: 'Sonno effettivo stimato', fmt: fmtDur },
+  awakenings: { label: 'Risvegli per notte', fmt: (v) => (Number.isInteger(v) ? String(v) : v.toFixed(1)) },
+  screenTimeTotal: { label: 'Screen time della giornata', fmt: fmtDur },
+  screenFreeMin: { label: 'Senza schermo prima di dormire', fmt: fmtDur },
 };
-function signedDuration(d) {
-  const r = Math.round(d);
-  if (r === 0) return null;
-  return `${r > 0 ? '+' : '−'}${formatDuration(Math.abs(r))}`;
-}
 const FIELD_WORD = { durationMin: 'intervallo di sonno', effectiveSleepMin: 'sonno effettivo stimato', screenFreeMin: 'tempo senza schermo', screenTimeTotal: 'screen time' };
+const nightsWord = (n) => `${n} ${n === 1 ? 'notte' : 'notti'}`;
 
-function metricTile(key, cur, delta) {
-  const ui = METRIC_UI[key];
-  const s = cur.stats[key];
-  let deltaLine;
-  if (s.n === 0) deltaLine = '';
-  else if (delta == null) deltaLine = `<span class="delta muted-delta">Confronto da ${MIN_N_FOR_DELTA} notti per settimana</span>`;
-  else {
-    const txt = ui.delta(delta);
-    deltaLine = txt
-      ? `<span class="delta"><span aria-hidden="true">${delta > 0 ? '↑' : '↓'}</span> ${txt} <span class="muted-delta">vs 7 notti prima</span></span>`
-      : '<span class="delta">= <span class="muted-delta">come le 7 notti prima</span></span>';
+function statLines(s, fmt) {
+  if (s.n === 0) return '<p class="n">Nessun dato</p>';
+  if (s.median == null) {
+    return `<p class="n">Solo ${nightsWord(s.n)}: ${s.values.map(fmt).join(', ')}</p><p class="n">La mediana compare da ${CFG.MEDIAN_MIN_NIGHTS} notti.</p>`;
   }
   return `
+    ${s.q1 != null ? `<p class="n">metà delle notti tra ${fmt(s.q1)} e ${fmt(s.q3)}</p>` : `<p class="n">IQR da ${CFG.IQR_MIN_NIGHTS} notti</p>`}
+    <p class="n">min ${fmt(s.min)} · max ${fmt(s.max)}</p>
+    <p class="n">su ${nightsWord(s.n)}</p>`;
+}
+
+function metricTile(key, cur) {
+  const ui = METRIC_UI[key];
+  const s = cur.stats[key];
+  const extra = key === 'awakenings' && s.n > 0
+    ? `<p class="n">${s.values.filter((v) => v > 0).length} su ${nightsWord(s.n)} con almeno un risveglio</p>` : '';
+  return `
     <div class="metric-tile">
-      <p class="label">${ui.label}</p>
-      <p class="value serif">${s.mean == null ? '—' : ui.fmt(s.mean)}</p>
-      <p class="n">${s.n === 0 ? 'Nessun dato' : `su ${s.n} ${s.n === 1 ? 'notte' : 'notti'}`}</p>
-      ${s.n >= 2 ? `<p class="n">tra ${ui.range(s.min)} e ${ui.range(s.max)}</p>` : ''}
-      ${key === 'awakenings' && s.n > 0 && cur.stats.awakeMinutes.mean != null ? `<p class="n">≈ ${formatDuration(Math.round(cur.stats.awakeMinutes.mean))} svegli per notte</p>` : ''}
+      <p class="label">${ui.label}${s.median != null ? ' <span class="muted-delta">mediana</span>' : ''}</p>
+      <p class="value serif">${s.median == null ? '—' : ui.fmt(s.median)}</p>
+      ${statLines(s, ui.fmt)}
+      ${extra}
       ${s.n === 0 ? '' : `<span class="conf conf-${s.confidence.level}">${s.confidence.label}</span>`}
-      ${deltaLine}
+    </div>`;
+}
+
+// Qualità: scala ordinale 1–10, mostrata come distribuzione dei voti più la
+// mediana. Indicatore descrittivo secondario (FINAL_ANALYTICS_SPEC §4).
+function qualityTile(cur) {
+  const s = cur.stats.quality;
+  const maxC = Math.max(1, ...cur.qualityCounts);
+  const desc = cur.qualityCounts.map((c, i) => (c ? `${i + 1}: ${c}` : '')).filter(Boolean).join(', ');
+  return `
+    <div class="metric-tile quality-tile">
+      <p class="label">Qualità percepita${s.median != null ? ' <span class="muted-delta">mediana</span>' : ''}</p>
+      <p class="value serif">${s.median == null ? '—' : `${Number.isInteger(s.median) ? s.median : s.median.toFixed(1)}<small>/10</small>`}</p>
+      ${s.n ? `<div class="qdist" role="img" aria-label="Distribuzione dei voti: ${desc}">
+        ${cur.qualityCounts.map((c, i) => `<span class="qcol"><span class="qbar" style="height:${c ? Math.max(8, Math.round((c / maxC) * 100)) : 0}%"></span><span class="qlab">${i + 1}</span></span>`).join('')}
+      </div>` : ''}
+      <p class="n">${s.n === 0 ? 'Nessun dato' : `su ${nightsWord(s.n)}`}</p>
+      ${s.n === 0 ? '' : `<span class="conf conf-${s.confidence.level}">${s.confidence.label}</span>`}
     </div>`;
 }
 
 function barsHTML(summary) {
   const durs = summary.nights.map((n) => (summary.excluded.some((x) => x.date === n.date && x.fields.includes('durationMin')) ? null : n.durationMin));
   const maxH = Math.max(600, ...durs.filter((v) => v != null));
+  const compact = summary.nights.length > 7;
   const desc = summary.nights.map((n) => `${nightShort(n.date)}: ${n.durationMin != null ? formatDuration(n.durationMin) : 'nessun dato'}${n.awakeMinutes > 0 ? `, di cui ${formatDuration(n.awakeMinutes)} svegli` : ''}${n.quality != null ? `, qualità ${n.quality}` : ''}`).join('; ');
   return `
-    <div class="bars" role="img" aria-label="Notte per notte. ${desc}">
+    <div class="bars ${compact ? 'is-compact' : ''}" role="img" aria-label="Notte per notte. ${desc}">
       ${summary.nights.map((n, i) => {
     const dur = n.durationMin;
     const isOut = durs[i] == null && dur != null;
     const h = dur != null ? Math.max(6, Math.round((dur / maxH) * 100)) : 0;
-    // Parte superiore della barra: minuti svegli, solo se indicati.
     const awakePct = dur != null && n.awakeMinutes > 0 ? Math.min(100, Math.round((n.awakeMinutes / dur) * 100)) : 0;
     return `
         <div class="bar-col">
-          <span class="bar-value">${dur != null ? `${Math.floor(dur / 60)}h${pad(dur % 60)}` : ''}</span>
+          ${compact ? '' : `<span class="bar-value">${dur != null ? `${Math.floor(dur / 60)}h${pad(dur % 60)}` : ''}</span>`}
           <div class="bar-track">${dur != null ? `<div class="bar ${isOut ? 'is-outlier' : ''}" style="height:${h}%">${awakePct ? `<div class="bar-awake" style="height:${Math.max(4, awakePct)}%"></div>` : ''}</div>` : '<div class="bar-empty"></div>'}</div>
-          <span class="bar-q ${n.quality == null ? 'is-empty' : ''}">${n.quality != null ? n.quality : '·'}</span>
-          <span class="bar-day">${weekdayShort(n.date)}</span>
+          ${compact ? '' : `<span class="bar-q ${n.quality == null ? 'is-empty' : ''}">${n.quality != null ? n.quality : '·'}</span>
+          <span class="bar-day">${weekdayShort(n.date)}</span>`}
         </div>`;
   }).join('')}
     </div>
-    <div class="bars-legend"><span><span class="key key-bar"></span>Intervallo di sonno</span>${summary.nights.some((n) => n.awakeMinutes > 0) ? '<span><span class="key key-awake"></span>Minuti svegli</span>' : ''}<span><span class="key key-q">7</span>Qualità</span>${summary.excluded.length ? '<span><span class="key key-out"></span>Anomalia</span>' : ''}</div>`;
+    <div class="bars-legend"><span><span class="key key-bar"></span>Intervallo di sonno</span>${summary.nights.some((n) => n.awakeMinutes > 0) ? '<span><span class="key key-awake"></span>Minuti svegli</span>' : ''}${compact ? '' : '<span><span class="key key-q">7</span>Qualità</span>'}${summary.excluded.length ? '<span><span class="key key-out"></span>Anomalia</span>' : ''}</div>`;
 }
 
-function weeklyHTML() {
-  const { current: cur, previous: prev, deltas } = weeklyComparison(state.entries, todayISO(), { includeOutliers: state.includeOutliers });
+function periodHTML() {
+  const days = state.period;
+  const cur = periodSummary(state.entries, todayISO(), days, { includeOutliers: state.includeOutliers });
   const anyData = cur.nightsWithData > 0;
   const bestWorst = cur.best ? `
     <div class="best-worst">
       <button type="button" class="night-link" data-open="${cur.best.date}">
-        <span class="bw-label">Notte migliore</span>
+        <span class="bw-label">Qualità più alta</span>
         <span class="bw-main">${nightShort(cur.best.date)}</span>
         <span class="bw-sub">Qualità ${cur.best.quality}${cur.best.durationMin != null ? ` · ${formatDuration(cur.best.durationMin)}` : ''}</span>
       </button>
       <button type="button" class="night-link" data-open="${cur.worst.date}">
-        <span class="bw-label">Notte peggiore</span>
+        <span class="bw-label">Qualità più bassa</span>
         <span class="bw-main">${nightShort(cur.worst.date)}</span>
         <span class="bw-sub">Qualità ${cur.worst.quality}${cur.worst.durationMin != null ? ` · ${formatDuration(cur.worst.durationMin)}` : ''}</span>
       </button>
     </div>` : '';
 
   const allExcluded = state.includeOutliers
-    ? weeklyComparison(state.entries, todayISO()).current.excluded
+    ? periodSummary(state.entries, todayISO(), days).excluded
     : cur.excluded;
   const outlierNote = allExcluded.length ? `
     <details class="outlier-note">
       <summary>${ICONS.info}<span>${state.includeOutliers
-    ? `Le anomalie confermate (${allExcluded.length} ${allExcluded.length === 1 ? 'notte' : 'notti'}) sono incluse nelle medie.`
-    : `${allExcluded.length} ${allExcluded.length === 1 ? 'notte con valori segnati come anomali è esclusa' : 'notti con valori segnati come anomali sono escluse'} dalle medie.`}</span></summary>
+    ? `Le anomalie confermate (${nightsWord(allExcluded.length)}) sono incluse nelle statistiche.`
+    : `${allExcluded.length} ${allExcluded.length === 1 ? 'notte con valori segnati come anomali è esclusa' : 'notti con valori segnati come anomali sono escluse'} dalle statistiche.`}</span></summary>
       <ul>${allExcluded.map((x) => `<li>${nightShort(x.date)}: ${x.fields.map((f) => FIELD_WORD[f]).join(', ')}</li>`).join('')}</ul>
-      <button type="button" class="btn-ghost" id="toggle-outliers">${state.includeOutliers ? 'Escludi le anomalie dalle medie' : 'Includi le anomalie nelle medie'}</button>
+      <button type="button" class="btn-ghost" id="toggle-outliers">${state.includeOutliers ? 'Escludi le anomalie dalle statistiche' : 'Includi le anomalie nelle statistiche'}</button>
     </details>` : '';
 
   return `
     <section class="week" aria-labelledby="week-title">
       <div class="section-title-row">
         <div>
-          <h2 class="section-h serif" id="week-title">Ultime 7 notti</h2>
+          <h2 class="section-h serif" id="week-title">Ultime ${days} notti</h2>
           <p class="section-sub">${shortRange(cur.dates)}</p>
         </div>
-        <span class="badge ${cur.coverage.level}" title="Notti con almeno un dato">Copertura ${cur.nightsWithData}/7</span>
+        <span class="badge ${cur.coverage.level}" title="Notti con almeno un dato">Copertura ${cur.nightsWithData}/${days}</span>
+      </div>
+      <div class="segmented seg-3" role="group" aria-label="Periodo del riepilogo">
+        ${PERIODS.map((p) => `<button type="button" class="seg-btn" data-period="${p}" aria-pressed="${p === days}">${p} notti</button>`).join('')}
       </div>
       ${anyData ? `
-        <div class="metric-grid">${['durationMin', 'effectiveSleepMin', 'quality', 'awakenings', 'screenTimeTotal', 'screenFreeMin'].map((k) => metricTile(k, cur, deltas[k])).join('')}</div>
-        <p class="compare-note"><strong>Come leggere questi numeri.</strong> La copertura conta le notti con almeno un dato; ogni media dice su quante notti è calcolata e tra quali valori variano: medie con un numero di notti diverso non descrivono le stesse notti. Risvegli e sonno effettivo stimato contano solo le notti in cui i risvegli sono indicati; il sonno effettivo stimato è l'intervallo di sonno meno i minuti svegli. Le etichette descrivono quante notti ci sono (6–7 = settimana quasi completa, 3–5 = parziale), non quanto il risultato sia stabile: con una sola settimana, una media può cambiare molto la settimana dopo, e differenze di pochi minuti o di qualche decimo rientrano spesso nella normale variazione da una notte all'altra. Confronto con le 7 notti precedenti (${shortRange(prev.dates)}, copertura ${prev.nightsWithData}/7): descrive cosa è cambiato, non perché.</p>
+        <div class="metric-grid">
+          ${metricTile('durationMin', cur)}
+          ${metricTile('effectiveSleepMin', cur)}
+          ${qualityTile(cur)}
+          ${metricTile('awakenings', cur)}
+          ${metricTile('screenTimeTotal', cur)}
+          ${metricTile('screenFreeMin', cur)}
+        </div>
+        <p class="compare-note"><strong>Come leggere questi numeri.</strong> Il numero grande è la <strong>mediana</strong>: metà delle notti sta sopra, metà sotto. "Metà delle notti tra… e…" è l'intervallo interquartile (dal 25° al 75° percentile): dove cade la metà centrale delle tue notti. Ogni riquadro indica su quante notti è calcolato, perché i dati mancanti differiscono da un riquadro all'altro. Risvegli e sonno effettivo stimato contano solo le notti in cui i risvegli sono indicati. La copertura conta le notti con almeno un dato. Sono descrizioni delle tue notti, non spiegazioni.</p>
         ${bestWorst}
         ${outlierNote}
-        <div class="card card-pad chart-block">
+        ${days <= 28 ? `<div class="card card-pad chart-block">
           <p class="chart-label">Notte per notte</p>
           ${barsHTML(cur)}
-        </div>` : '<div class="card card-pad"><p class="muted">Nessuna notte registrata negli ultimi 7 giorni. Il riepilogo compare dalla prima notte salvata.</p></div>'}
+        </div>` : ''}` : `<div class="card card-pad"><p class="muted">Nessuna notte registrata negli ultimi ${days} giorni. Il riepilogo compare dalla prima notte salvata.</p></div>`}
     </section>`;
 }
 
-const VAR_NAME = {
-  screenTimeTotal: 'screen time della giornata', screenFreeMin: 'tempo senza schermo prima di dormire', durationMin: 'intervallo di sonno', quality: 'qualità del sonno',
-  awakenings: 'numero di risvegli', awakeMinutes: 'minuti svegli durante la notte', effectiveSleepMin: 'sonno effettivo stimato',
-};
-const MORE_X = {
-  screenTimeTotal: 'a uno screen time più alto', screenFreeMin: 'a più tempo senza schermo',
-  awakenings: 'a più risvegli', awakeMinutes: 'a più minuti svegli', effectiveSleepMin: 'a più sonno effettivo stimato',
-};
-const Y_DIR = { durationMin: ['un intervallo di sonno più lungo', 'un intervallo di sonno più breve'], quality: ['una qualità più alta', 'una qualità più bassa'] };
-// Coppie che usano i risvegli: il campione è più piccolo (solo notti con i
-// risvegli indicati) e molte notti hanno 0 risvegli.
-const AWAKENING_KEYS = ['awakenings', 'awakeMinutes', 'effectiveSleepMin'];
-const OZ_LABEL = { durationMin: 'Intervallo di sonno', effectiveSleepMin: 'Sonno effettivo stimato', awakeMinutes: 'Minuti svegli durante la notte', screenFreeMin: 'Tempo senza schermo prima di dormire', screenTimeTotal: 'Screen time della giornata' };
+const REASON_WORD = { outlier: 'anomalia confermata', incoherent: 'orari incoerenti' };
+const roundTo5 = (v) => Math.round(v / 5) * 5;
 
-// Coppie non mostrate, con il motivo: senza questa riga l'assenza di una
-// coppia poteva essere letta come "nessun legame" (§6 della metodologia).
-function hiddenPairsHTML(correlations) {
-  const hidden = correlations.filter((c) => !c.shown);
-  if (!hidden.length) return '';
-  const why = { n: (c) => `${c.n}/14 notti con entrambi i dati`, variance: () => 'uno dei due valori non varia mai', weak: () => "nessuna associazione lineare rilevabile (non esclude relazioni di altro tipo)" };
-  return `<p class="muted small">Non mostrate: ${hidden.map((c) => `${VAR_NAME[c.x]} e ${VAR_NAME[c.y]} — ${why[c.reason](c)}`).join('; ')}.</p>`;
-}
-
-function excludedNote(count) {
-  if (!count) return '';
-  return state.includeOutliers
-    ? ` Le anomalie confermate sono incluse (impostazione scelta nel riepilogo settimanale).`
-    : ` ${count} ${count === 1 ? 'notte segnata come anomala è esclusa' : 'notti segnate come anomale sono escluse'}.`;
+function regularityHTML() {
+  const t = todayISO();
+  const r = regularityForWindow(state.entries, t, { includeOutliers: state.includeOutliers });
+  const period = `${fmtDate(r.from)} – ${fmtDate(r.to)}`;
+  const excl = r.excluded.length
+    ? `<p class="detail"><strong>Escluse:</strong> ${r.excluded.map((x) => `${nightShort(x.date)} (${REASON_WORD[x.reason]})`).join('; ')}.</p>` : '';
+  const sd = (v) => (v == null ? 'non definita' : `${roundTo5(v)} min`);
+  return `
+    <section class="analysis-block" aria-labelledby="reg-title">
+      <h2 class="section-h serif" id="reg-title">Regolarità degli orari</h2>
+      <div class="card card-pad">
+        ${r.shown ? `
+          <div class="reg-grid">
+            <div><p class="label">Addormentamento</p><p class="serif big-num">${sd(r.sdOnset)}</p><p class="muted small">variabilità attorno alle ${r.meanOnset || '—'}</p></div>
+            <div><p class="label">Risveglio</p><p class="serif big-num">${sd(r.sdWake)}</p><p class="muted small">variabilità attorno alle ${r.meanWake || '—'}</p></div>
+          </div>
+          <p class="muted small">${nightsWord(r.n)} con addormentamento e risveglio, ${period}.</p>` : `
+          <p class="muted">Servono almeno ${r.min} notti con addormentamento e risveglio negli ultimi ${r.days} giorni (${r.n}/${r.min} finora).</p>`}
+        <details>
+          <summary>Come è calcolata e limiti</summary>
+          <p class="detail"><strong>Metodo.</strong> Deviazione standard circolare degli orari, in minuti, arrotondata a 5: indica di quanto i tuoi orari si discostano in genere dal loro valore medio, tenendo conto della mezzanotte (23:30 e 00:30 distano 30 minuti, non 23 ore). Periodo: gli ultimi ${r.days} giorni di calendario. Minimo: ${r.min} notti (scelta progettuale, non uno standard).</p>
+          <p class="detail"><strong>Limiti.</strong> Con 14–20 notti l'incertezza della stima è di circa ±20%. Non considera i risvegli notturni né i sonnellini. Non è un punteggio e non c'è un valore "giusto": descrive solo quanto variano i tuoi orari.</p>
+          ${excl}
+          ${r.excluded.some((x) => x.reason === 'outlier') || state.includeOutliers ? `<p class="detail">${state.includeOutliers ? 'Le anomalie confermate sono incluse (impostazione scelta nel riepilogo).' : 'Le anomalie confermate si possono includere dal riepilogo.'}</p>` : ''}
+        </details>
+      </div>
+    </section>`;
 }
 
 function renderTrend() {
   const key = focusKey();
   const t = todayISO();
-  const nights = analysisNights(state.entries, { includeOutliers: state.includeOutliers });
-  const allNights = analysisNights(state.entries, { includeOutliers: true });
   const lastNightEntry = state.entries[t];
   const lastNightMetrics = computeNightMetrics(lastNightEntry, t);
   const lastNight = { quality: lastNightEntry && lastNightEntry.quality != null ? lastNightEntry.quality : null, durationMin: lastNightMetrics.durationMin };
-
-  const consistency = consistencyForWindow(nights, t, 28);
-  const correlations = correlationResults(nights);
-  const excludedForPair = (c) => allNights.filter((n) => (n.excludedSleep && ['durationMin', 'effectiveSleepMin', 'screenFreeMin'].some((k) => k === c.x || k === c.y)) || (n.excludedScreen && c.x === 'screenTimeTotal')).length;
-  const nightsExcludedAny = nights.filter((n) => n.excludedSleep || n.excludedScreen).length;
-  const oz = optimalZone(nights);
-
   const lastNightFilled = lastNight.quality != null || lastNight.durationMin != null;
-  const ozMessage = () => {
-    if (oz.reason === 'total') return `Servono almeno ${OPTIMAL_MIN_TOTAL} notti con la qualità registrata (${oz.n}/${OPTIMAL_MIN_TOTAL} finora).`;
-    if (oz.reason === 'best') return `Servono almeno ${OPTIMAL_MIN_GROUP} notti nel gruppo "migliori" (${oz.bestN}/${OPTIMAL_MIN_GROUP} finora, qualità ≥ ${oz.threshold}).`;
-    return `Servono almeno ${OPTIMAL_MIN_GROUP} notti da confrontare con le migliori (${oz.restN}/${OPTIMAL_MIN_GROUP} finora): quasi tutte le notti hanno qualità ≥ ${oz.threshold}.`;
-  };
 
   tabContent().innerHTML = `
     <div class="hero">
@@ -975,52 +1177,26 @@ function renderTrend() {
       </button>`}
     </div>
 
-    ${weeklyHTML()}
+    ${periodHTML()}
 
-    <h2 class="section-h serif preview-h">Analisi in anteprima</h2>
-    <p class="section-sub">Si attivano con più notti raccolte. Descrivono associazioni nei tuoi dati, non cause.</p>
+    ${regularityHTML()}
 
-    <div class="analysis-block">
-      <h3 class="section-title">Regolarità degli orari</h3>
+    <section class="analysis-block" aria-labelledby="qs-title">
+      <h2 class="section-h serif" id="qs-title">Schermo e sonno</h2>
       <div class="card card-pad">
-        ${consistency.shown ? `
-          <details>
-            <summary><span class="serif big-num">${consistency.score}</span><span class="muted">/100 negli ultimi ${consistency.days} giorni (${consistency.n} notti con orari completi)</span></summary>
-            <p class="detail">Deviazione standard circolare degli orari di addormentamento e risveglio. Formula: 100 − (variabilità media / 90 × 100): 100 = orari identici ogni notte.${excludedNote(consistency.excluded)}</p>
-          </details>` : `<p class="muted">Servono almeno ${CONSISTENCY_MIN_NIGHTS} notti con orari completi negli ultimi 28 giorni (${consistency.n}/${CONSISTENCY_MIN_NIGHTS} finora).${excludedNote(consistency.excluded)}</p>`}
+        <p class="muted">Le analisi sul rapporto tra uso dello schermo e sonno saranno disponibili quando il diario conterrà i nuovi dati (ora in cui provi a dormire, tipo di giorno, origine dei dati) per un numero sufficiente di notti. Fino ad allora l'app non mostra associazioni: con pochi dati e notti che si somigliano tra loro, sarebbero spesso apparenti.</p>
       </div>
-    </div>
-
-    <div class="analysis-block">
-      <h3 class="section-title">Associazioni osservate <em>(non causali)</em></h3>
-      <div class="card card-pad">
-        ${correlations.some((c) => c.shown) ? correlations.filter((c) => c.shown).map((c) => `
-          <details>
-            <summary><strong>${capitalize(VAR_NAME[c.x])} e ${VAR_NAME[c.y]}</strong>: ${c.signalLabel.toLowerCase()}, ${c.direction === 'positive' ? 'positivo' : 'negativo'} · ${c.n} notti${c.warn ? ' <span class="warn-tag">pochi dati</span>' : ''}</summary>
-            <p class="detail">Nelle tue notti, ${MORE_X[c.x]} corrisponde in media ${Y_DIR[c.y][c.direction === 'positive' ? 0 : 1]}. Non dice che una cosa causi l'altra: entrambe potrebbero dipendere da altro (stress, orari, attività).${AWAKENING_KEYS.includes(c.x) ? ' Calcolata solo sulle notti con i risvegli indicati; molte notti senza risvegli rendono il valore di r meno informativo.' : ''}
-            <br>n=${c.n} notti dal ${fmtDate(c.from)} al ${fmtDate(c.to)} · r=${c.r.toFixed(2)} (Pearson: misura solo relazioni lineari). "${c.signalLabel}" descrive quanto è marcata l'associazione in queste notti, non quanto sia certa: ${c.warn ? 'con meno di 30 notti può cambiare molto con nuovi dati.' : 'anche con più di 30 notti può indebolirsi o sparire nel tempo.'}${excludedNote(excludedForPair(c))}</p>
-          </details>`).join('') : `<p class="muted">Nessuna associazione da mostrare.${excludedNote(nightsExcludedAny)}</p>`}
-        ${hiddenPairsHTML(correlations)}
-      </div>
-    </div>
-
-    <div class="analysis-block">
-      <h3 class="section-title">Condizioni delle notti migliori</h3>
-      <div class="card card-pad">
-        ${oz.shown ? `
-          <p class="muted">Confronto tra le ${oz.bestN} notti con qualità ≥ ${oz.threshold} (${Math.round((oz.bestN / oz.n) * 100)}% delle notti valutate) e le altre ${oz.restN}. La soglia è il tuo 75° percentile di qualità, con un minimo di 7; le notti a pari merito con la soglia sono tutte incluse, per questo il gruppo può superare il 25%. Confrontando più aspetti su un numero limitato di notti, qualche differenza può comparire per caso: è un'indicazione da osservare nel tempo, non una regola.${excludedNote(nightsExcludedAny)}</p>
-          ${oz.results.filter((r) => r.shown).length ? oz.results.filter((r) => r.shown).map((r) => `
-            <details>
-              <summary><strong>${OZ_LABEL[r.key]}</strong>: ${r.signalLabel.toLowerCase()}</summary>
-              <p class="detail">Notti migliori: ${formatDuration(Math.round(r.m1))} in media (n=${r.n1}) — altre notti: ${formatDuration(Math.round(r.m2))} (n=${r.n2}). Differenza standardizzata d=${r.d.toFixed(2)}. È un confronto tra gruppi di notti, non una regola da seguire.</p>
-            </details>`).join('') : '<p class="muted">Nessuna differenza abbastanza marcata da segnalare.</p>'}
-          ${oz.results.some((r) => r.reason === 'n') ? `<p class="muted small">Non confrontate per dati insufficienti (meno di ${OPTIMAL_MIN_GROUP} notti per gruppo): ${oz.results.filter((r) => r.reason === 'n').map((r) => OZ_LABEL[r.key].toLowerCase()).join(', ')}.</p>` : ''}
-        ` : `<p class="muted">${ozMessage()}</p>`}
-      </div>
-    </div>
+    </section>
   `;
 
   root.querySelectorAll('[data-open]').forEach((b) => b.addEventListener('click', () => selectNight(b.dataset.open)));
+  root.querySelectorAll('[data-period]').forEach((b) => b.addEventListener('click', () => {
+    state.period = Number(b.dataset.period);
+    setPref('trend_period', String(state.period));
+    renderTrend();
+    const again = root.querySelector(`[data-period="${state.period}"]`);
+    if (again) again.focus({ preventScroll: true });
+  }));
   const tog = document.getElementById('toggle-outliers');
   if (tog) tog.addEventListener('click', () => {
     state.includeOutliers = !state.includeOutliers;
@@ -1104,6 +1280,29 @@ function renderSettings() {
       <button type="button" class="btn-ghost ${state.remindersEnabled ? 'active' : ''}" id="reminder-toggle" aria-pressed="${state.remindersEnabled}">${state.remindersEnabled ? 'Attivo' : 'Disattivato'}</button>
       <p class="muted small" id="reminder-note"></p>
     </section>
+    <section class="card card-pad" aria-labelledby="week-tpl-title">
+      <h3 class="settings-title" id="week-tpl-title">Giorni vincolati e liberi</h3>
+      <p class="muted">Lo schema della tua settimana tipo. Serve solo a proporre il tipo di giorno quando compili un nuovo mattino; puoi sempre correggerlo notte per notte, e il valore della singola notte prevale.</p>
+      <div class="tpl-grid">
+        ${[1, 2, 3, 4, 5, 6, 0].map((i) => `
+          <button type="button" class="tpl-day ${state.dayTemplate[i] === 'constrained' ? 'is-constrained' : ''}" data-tpl="${i}" aria-pressed="${state.dayTemplate[i] === 'constrained'}">
+            <span class="tpl-name">${WEEKDAY_FULL[i]}</span><span class="tpl-val">${state.dayTemplate[i] === 'constrained' ? 'Vincolato' : 'Libero'}</span>
+          </button>`).join('')}
+      </div>
+      <p class="muted small">Il giorno è quello del risveglio: "lunedì vincolato" vale per la notte tra domenica e lunedì.</p>
+    </section>
+    <section class="card card-pad" aria-labelledby="ctx-defs-title">
+      <h3 class="settings-title" id="ctx-defs-title">Definizioni degli indicatori</h3>
+      <p class="muted">Orari usati nelle domande "Caffeina dopo le…" e "Alcol dalle…". Sono scelte personali, non soglie cliniche. Ogni risposta salvata conserva l'orario in vigore quando l'hai data.</p>
+      <div class="row">
+        <label class="row-label" for="def-caffeine">Caffeina tardiva: dopo le</label>
+        <div class="row-control"><input type="time" class="def-time" id="def-caffeine" value="${state.contextDefs.lateCaffeineFrom}"></div>
+      </div>
+      <div class="row">
+        <label class="row-label" for="def-alcohol">Alcol: dalle</label>
+        <div class="row-control"><input type="time" class="def-time" id="def-alcohol" value="${state.contextDefs.alcoholFrom}"></div>
+      </div>
+    </section>
     <section class="card card-pad" aria-labelledby="data-title">
       <h3 class="settings-title" id="data-title">I tuoi dati</h3>
       <p class="muted">Restano solo su questo dispositivo, senza copie altrove. Salva ogni tanto un backup e conservalo fuori dal telefono (es. in iCloud Drive o via email).</p>
@@ -1133,7 +1332,7 @@ function renderSettings() {
     </section>
     <section class="card card-pad">
       <h3 class="settings-title">Su questa versione</h3>
-      <p class="muted">App installabile, funziona anche offline, nessun dato lascia il dispositivo. Raccolta dati, calendario, andamento, export CSV e backup completi; le analisi avanzate sono in anteprima.</p>
+      <p class="muted">App installabile, funziona anche offline, nessun dato lascia il dispositivo. Raccolta dati, calendario, andamento descrittivo, export CSV e backup completi. Schema dei dati: versione ${SCHEMA_VERSION}.</p>
     </section>
   `;
 
@@ -1141,6 +1340,19 @@ function renderSettings() {
   document.getElementById('theme-dark').addEventListener('click', () => setTheme('dark'));
   document.getElementById('export-csv').addEventListener('click', () => { if (!state.demo) downloadCSV(state.entries); });
   attachBackupListeners();
+  root.querySelectorAll('[data-tpl]').forEach((b) => b.addEventListener('click', () => {
+    const i = Number(b.dataset.tpl);
+    state.dayTemplate[i] = state.dayTemplate[i] === 'constrained' ? 'free' : 'constrained';
+    setPref('daytype_template', JSON.stringify(state.dayTemplate));
+    renderSettings();
+  }));
+  [['def-caffeine', 'lateCaffeineFrom', 'late_caffeine_from'], ['def-alcohol', 'alcoholFrom', 'alcohol_from']].forEach(([id, k, pref]) => {
+    document.getElementById(id).addEventListener('change', (e) => {
+      if (!/^\d{2}:\d{2}$/.test(e.target.value)) { e.target.value = state.contextDefs[k]; return; }
+      state.contextDefs[k] = e.target.value;
+      setPref(pref, e.target.value);
+    });
+  });
   document.getElementById('demo-toggle').addEventListener('click', () => { setDemo(!state.demo); render(); });
   document.getElementById('reminder-toggle').addEventListener('click', async () => {
     let note = '';
@@ -1178,6 +1390,7 @@ function saveBackup() {
   setPref('last_backup', now.toISOString());
 }
 
+const WEEKDAY_FULL = ['Domenica', 'Lunedì', 'Martedì', 'Mercoledì', 'Giovedì', 'Venerdì', 'Sabato'];
 const fmtDate = (date) => new Date(date + 'T00:00:00').toLocaleDateString('it-IT', { day: 'numeric', month: 'short', year: 'numeric' });
 
 function importPanelHTML() {
@@ -1220,7 +1433,7 @@ function importPanelHTML() {
     <ul class="import-counts">
       <li><strong>${plan.add.length}</strong> ${plan.add.length === 1 ? 'nuova: verrà aggiunta' : 'nuove: verranno aggiunte'}</li>
       <li><strong>${plan.identical.length}</strong> già ${plan.identical.length === 1 ? 'presente e identica' : 'presenti e identiche'}: nessuna modifica</li>
-      <li><strong>${plan.conflicts.length}</strong> già ${plan.conflicts.length === 1 ? 'presente' : 'presenti'} con dati diversi${plan.conflicts.length ? ` (${conflictList})` : ''}</li>
+      <li><strong>${plan.conflicts.length}</strong> già ${plan.conflicts.length === 1 ? 'presente' : 'presenti'} con dati diversi${plan.conflicts.length ? ` (${conflictList})` : ''}${plan.metaOnly.length ? `; di cui ${plan.metaOnly.length} con gli stessi valori e solo l'origine dei dati diversa` : ''}</li>
     </ul>
     ${plan.conflicts.length ? `
     <fieldset class="import-mode">
@@ -1305,6 +1518,87 @@ async function runImport() {
   showImportPanel();
 }
 
+// ---------- Aggiornamento del database (schermata obbligatoria) ----------
+// Prima di aggiornare lo schema: 1) backup dei dati così come sono, creato
+// e verificato rileggendolo; 2) conferma di averlo salvato; 3) aggiornamento;
+// 4) confronto di ogni record prima/dopo con quello atteso dalla migrazione
+// (per v3 → v4: identico). Nessun dato viene modificato prima del punto 3.
+const recordsKey = (records) => JSON.stringify([...records].sort((a, b) => (a.date < b.date ? -1 : 1)).map((r) => Object.fromEntries(Object.keys(r).sort().map((k) => [k, r[k]]))));
+function migrationBackup() {
+  const mg = state.migration;
+  const now = new Date();
+  const map = Object.fromEntries(mg.before.map((r) => [r.date, r]));
+  const text = JSON.stringify(buildBackup(map, { schemaVersion: mg.fromVersion, now }), null, 2);
+  // Verifica: il file deve essere un backup valido e restituire esattamente
+  // i record attesi (gli stessi, convertiti dalle regole di migrazione).
+  const parsed = parseBackup(text, { schemaVersion: SCHEMA_VERSION, migrate: migrateRecords });
+  const expected = migrateRecords(mg.before.map((r) => ({ ...r })), mg.fromVersion);
+  mg.backupOk = parsed.ok && recordsKey(parsed.records) === recordsKey(expected);
+  mg.backupCount = parsed.ok ? parsed.records.length : 0;
+  if (!mg.backupOk) { mg.error = 'Il backup creato non corrisponde ai dati: aggiornamento sospeso. I tuoi dati non sono stati toccati.'; return; }
+  downloadFile(text, backupFilename(now).replace('.json', `-prima-aggiornamento-v${mg.fromVersion}.json`), 'application/json');
+  setPref('last_backup', now.toISOString());
+}
+
+async function runMigration() {
+  const mg = state.migration;
+  if (!mg.backupOk || !mg.saved || mg.step !== 'backup') return;
+  mg.step = 'running';
+  renderMigration();
+  const expected = migrateRecords(mg.before.map((r) => ({ ...r })), mg.fromVersion);
+  let after = null;
+  try { after = await getAllEntries(); } catch (e) { after = null; }
+  if (!after) { mg.step = 'failed'; mg.error = 'Non è stato possibile aprire il database aggiornato. Chiudi e riapri l\'app: i dati sono ancora quelli di prima.'; renderMigration(); return; }
+  const afterList = Object.values(after);
+  mg.same = recordsKey(afterList) === recordsKey(expected);
+  mg.countAfter = afterList.length;
+  mg.countExpected = expected.length;
+  mg.step = mg.same ? 'done' : 'mismatch';
+  renderMigration();
+}
+
+function renderMigration() {
+  const mg = state.migration;
+  const n = mg.before.length;
+  let body;
+  if (mg.step === 'backup') {
+    body = `
+      <p>Questa versione dell'app aggiunge nuove informazioni facoltative al diario (ora in cui provi a dormire, tipo di giorno, origine dei dati). Il database va aggiornato dalla versione ${mg.fromVersion} alla ${SCHEMA_VERSION}.</p>
+      <p><strong>Le tue ${n} notti non verranno modificate.</strong> Prima dell'aggiornamento serve comunque un backup.</p>
+      <ol class="mig-steps">
+        <li>
+          <button type="button" class="btn-ghost" id="mig-backup">${ICONS.download}<span>${mg.backupOk ? 'Scarica di nuovo il backup' : 'Crea e scarica il backup'}</span></button>
+          ${mg.backupOk ? `<p class="muted small">Backup creato e verificato: ${mg.backupCount} notti, identiche a quelle del dispositivo. Salvalo in File o in iCloud Drive.</p>` : ''}
+        </li>
+        <li>
+          <label class="aw-check"><input type="checkbox" id="mig-saved" ${mg.saved ? 'checked' : ''} ${mg.backupOk ? '' : 'disabled'}><span>Ho salvato il file del backup fuori dall'app</span></label>
+        </li>
+        <li>
+          <button type="button" class="btn-primary" id="mig-run" aria-disabled="${!(mg.backupOk && mg.saved)}">Aggiorna il database</button>
+        </li>
+      </ol>
+      ${mg.error ? msgHTML(mg.error, 'error') : ''}`;
+  } else if (mg.step === 'running') {
+    body = '<p role="status">Aggiornamento e verifica in corso…</p>';
+  } else if (mg.step === 'done') {
+    body = `
+      ${msgHTML(`Aggiornamento completato e verificato: ${mg.countAfter} notti, ognuna identica a prima. Nessun valore è stato modificato; le informazioni nuove restano "non indicate" finché non le compili.`, 'info')}
+      <button type="button" class="btn-primary" id="mig-continue">Apri il diario</button>`;
+  } else {
+    body = `
+      ${msgHTML(mg.step === 'mismatch'
+    ? `La verifica dopo l'aggiornamento ha trovato differenze (${mg.countAfter} notti trovate, ${mg.countExpected} attese). Non inserire nuovi dati: conserva il backup appena scaricato e contatta chi ti ha fornito l'app.`
+    : mg.error, 'error')}
+      <button type="button" class="btn-ghost" id="mig-backup">${ICONS.download}<span>Scarica di nuovo il backup di prima</span></button>`;
+  }
+  tabContent().innerHTML = `<section class="card card-pad migration" aria-labelledby="mig-title"><h2 class="section-h serif" id="mig-title" tabindex="-1">Aggiornamento dei dati</h2>${body}</section>`;
+  const $ = (id) => document.getElementById(id);
+  if ($('mig-backup')) $('mig-backup').addEventListener('click', () => { migrationBackup(); renderMigration(); $('mig-backup').focus(); });
+  if ($('mig-saved')) $('mig-saved').addEventListener('change', (e) => { mg.saved = e.target.checked; renderMigration(); $('mig-saved').focus(); });
+  if ($('mig-run')) $('mig-run').addEventListener('click', runMigration);
+  if ($('mig-continue')) $('mig-continue').addEventListener('click', async () => { state.migration = null; state.loaded = false; await startApp(); });
+}
+
 function setTheme(theme) {
   state.theme = theme;
   applyTheme(theme);
@@ -1371,6 +1665,12 @@ function render() {
   if (exitBtn) exitBtn.addEventListener('click', () => { setDemo(false); render(); });
   const updBtn = root.querySelector('#update-now');
   if (updBtn) updBtn.addEventListener('click', applyUpdate);
+  if (state.migration) {
+    root.innerHTML = `${renderHeader()}<main id="tab-content"></main>`;
+    document.getElementById('theme-toggle').addEventListener('click', () => setTheme(state.theme === 'light' ? 'dark' : 'light'));
+    renderMigration();
+    return;
+  }
   if (!state.loaded) {
     tabContent().innerHTML = '<p class="muted">Caricamento…</p>';
   } else if (state.loadError) {

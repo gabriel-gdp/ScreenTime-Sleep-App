@@ -11,6 +11,9 @@
 // e il vincolo "ultimo utilizzo ≤ addormentamento" si verifica dentro lo
 // stesso record, esattamente come l'utente lo vede a schermo.
 
+import { ANALYSIS_CONFIG as CFG, hhmmToMin } from './config.js';
+import { screenTimeReference, provenanceOf, PROVENANCE_FIELDS } from './record.js';
+
 export function pad(n) { return n.toString().padStart(2, '0'); }
 
 export function todayISO(d = new Date()) {
@@ -89,6 +92,12 @@ export function formatDuration(mins) {
   return `${h}h ${pad(m)}m`;
 }
 
+// "2 ore", "14" (unit=false) o "1h 30m" per soglie non intere.
+function hoursText(mins, unit = true) {
+  if (mins % 60) return formatDuration(mins);
+  return unit ? `${mins / 60} ore` : String(mins / 60);
+}
+
 export function minutesToHHMM(mins) {
   if (mins === '' || mins == null || isNaN(mins)) return '';
   const h = Math.floor(mins / 60), m = mins % 60;
@@ -136,6 +145,8 @@ export function computeNightMetrics(entry, date) {
     // Intervallo di sonno (durationMin) e sonno effettivo stimato restano
     // distinti: il secondo esiste solo se i risvegli sono stati indicati.
     effectiveSleepMin: null, effectiveError: null,
+    // Schema 4: coerenza tra coricamento, tentativo e addormentamento.
+    latencyMin: null, attemptError: null, latencyWarning: null, inBedError: null,
   };
 
   let bedInstant = null;
@@ -147,7 +158,7 @@ export function computeNightMetrics(entry, date) {
       result.durationError = "L'orario di risveglio deve essere successivo a quello in cui ti sei addormentato/a.";
     } else {
       result.durationMin = dur;
-      if (dur < 120 || dur > 840) result.durationWarning = 'Durata insolita (meno di 2 ore o più di 14): controlla gli orari.';
+      if (dur < CFG.DURATION_WARN_BELOW_MIN || dur > CFG.DURATION_WARN_ABOVE_MIN) result.durationWarning = `Durata insolita (meno di ${hoursText(CFG.DURATION_WARN_BELOW_MIN)} o più di ${hoursText(CFG.DURATION_WARN_ABOVE_MIN, false)}): controlla gli orari.`;
     }
   }
 
@@ -163,7 +174,32 @@ export function computeNightMetrics(entry, date) {
     } else {
       result.screenFreeMin = diff;
       if (diff === 0) result.screenFreeWarning = "Zero minuti senza schermo: hai smesso di usarlo proprio quando ti sei addormentato/a? Se sì, va bene così.";
-      else if (diff > 360) result.screenFreeWarning = 'Più di 6 ore senza schermo prima di dormire: controlla gli orari.';
+      else if (diff > CFG.SCREEN_FREE_WARN_ABOVE_MIN) result.screenFreeWarning = `Più di ${hoursText(CFG.SCREEN_FREE_WARN_ABOVE_MIN)} senza schermo prima di dormire: controlla gli orari.`;
+    }
+  }
+
+  // Tentativo di dormire ≤ addormentamento (bloccante); latenza molto
+  // lunga → conferma. Con il risveglio noto il confronto è in tempo reale.
+  const before = (aHHMM, bHHMM, bInstant) => (bInstant
+    ? minutesBetween(nearestInstant(bInstant, aHHMM), bInstant)
+    : nearestClockDiff(aHHMM, bHHMM));
+  let attemptInstant = null;
+  if (e.sleepAttempt && e.bedtime) {
+    const lat = before(e.sleepAttempt, e.bedtime, bedInstant);
+    if (lat < 0) result.attemptError = `Hai indicato di aver provato a dormire (${e.sleepAttempt}) dopo l'orario in cui ti sei addormentato/a (${e.bedtime}). Correggi uno dei due orari.`;
+    else {
+      result.latencyMin = lat;
+      if (bedInstant) attemptInstant = new Date(bedInstant.getTime() - lat * 60000);
+      if (lat > CFG.LATENCY_CONFIRM_ABOVE_MIN) result.latencyWarning = `Tra il momento in cui hai provato a dormire e l'addormentamento passano più di ${hoursText(CFG.LATENCY_CONFIRM_ABOVE_MIN)}: è corretto?`;
+    }
+  }
+  if (e.inBedTime) {
+    const ref = e.sleepAttempt && !result.attemptError ? e.sleepAttempt : e.bedtime;
+    const refInstant = ref === e.sleepAttempt ? attemptInstant : bedInstant;
+    if (ref && before(e.inBedTime, ref, refInstant) < 0) {
+      result.inBedError = ref === e.sleepAttempt
+        ? `L'ora in cui sei andato/a a letto (${e.inBedTime}) non può essere dopo quella in cui hai provato a dormire (${e.sleepAttempt}).`
+        : `L'ora in cui sei andato/a a letto (${e.inBedTime}) non può essere dopo l'addormentamento (${e.bedtime}).`;
     }
   }
 
@@ -177,23 +213,29 @@ export function computeNightMetrics(entry, date) {
 }
 
 // --- Plausibility warning (soft, mai bloccanti) — soglie di ANALYTICS_METHODOLOGY.md §7.1 ---
+// Fascia oraria [from, to] sul ciclo di 24 h, confini inclusi; se from > to
+// la fascia attraversa la mezzanotte (es. 18:00–06:00).
+function inClockRange(mins, from, to) {
+  const a = hhmmToMin(from), b = hhmmToMin(to);
+  return a <= b ? mins >= a && mins <= b : mins >= a || mins <= b;
+}
 export function bedtimeRangeWarning(hhmm) {
   if (!hhmm) return null;
   const mins = timeToMinutesOfDay(hhmm);
-  const plausible = mins >= 18 * 60 || mins <= 6 * 60; // 18:00–06:00
-  return plausible ? null : "Orario di addormentamento insolito (fuori dalla fascia 18:00–06:00).";
+  const plausible = inClockRange(mins, CFG.ONSET_PLAUSIBLE_FROM, CFG.ONSET_PLAUSIBLE_TO);
+  return plausible ? null : `Orario di addormentamento insolito (fuori dalla fascia ${CFG.ONSET_PLAUSIBLE_FROM}–${CFG.ONSET_PLAUSIBLE_TO}).`;
 }
 
 export function wakeTimeRangeWarning(hhmm) {
   if (!hhmm) return null;
   const mins = timeToMinutesOfDay(hhmm);
-  const plausible = mins >= 3 * 60 && mins <= 14 * 60; // 03:00–14:00
-  return plausible ? null : 'Orario di risveglio insolito (fuori dalla fascia 03:00–14:00).';
+  const plausible = inClockRange(mins, CFG.WAKE_PLAUSIBLE_FROM, CFG.WAKE_PLAUSIBLE_TO);
+  return plausible ? null : `Orario di risveglio insolito (fuori dalla fascia ${CFG.WAKE_PLAUSIBLE_FROM}–${CFG.WAKE_PLAUSIBLE_TO}).`;
 }
 
 export function screenTimeTotalWarning(mins) {
   if (mins == null || mins === '' || isNaN(mins)) return null;
-  return mins > 960 ? 'Screen time molto elevato (oltre 16 ore): controlla il valore.' : null;
+  return mins > CFG.SCREEN_TIME_WARN_ABOVE_MIN ? `Screen time molto elevato (oltre ${hoursText(CFG.SCREEN_TIME_WARN_ABOVE_MIN)}): controlla il valore.` : null;
 }
 
 // Etichette di NUMEROSITÀ (§0 della metodologia): dicono su quante notti si
@@ -202,16 +244,17 @@ export function screenTimeTotalWarning(mins) {
 // dopo; per questo non si usano più parole come "confidenza".
 export function dataConfidence(daysWithData, totalDays) {
   const ratio = daysWithData / totalDays;
-  const high = { label: 'Settimana quasi completa', level: 'high' };
-  const mid = { label: 'Settimana parziale', level: 'mid' };
+  const week = totalDays === 7;
+  const high = { label: week ? 'Settimana quasi completa' : 'Periodo quasi completo', level: 'high' };
+  const mid = { label: week ? 'Settimana parziale' : 'Periodo parziale', level: 'mid' };
   const low = { label: 'Troppo poche notti', level: 'low' };
-  if (totalDays === 7) {
-    if (daysWithData >= 6) return high;
-    if (daysWithData >= 3) return mid;
+  if (week) {
+    if (daysWithData >= CFG.COVERAGE_WEEK_HIGH_NIGHTS) return high;
+    if (daysWithData >= CFG.COVERAGE_WEEK_MID_NIGHTS) return mid;
     return low;
   }
-  if (ratio >= 0.8) return high;
-  if (ratio >= 0.33) return mid;
+  if (ratio >= CFG.COVERAGE_HIGH_SHARE) return high;
+  if (ratio >= CFG.COVERAGE_MID_SHARE) return mid;
   return low;
 }
 
@@ -278,18 +321,7 @@ export function periodSummary(entries, endDate, days = 7, { includeOutliers = fa
   //   effettivamente usate (senza mancanti e anomalie escluse). Con 6/7
   //   notti compilate ma 2 sole qualità, la qualità media è "Dati
   //   insufficienti" anche se la copertura è alta.
-  const stats = Object.fromEntries(SUMMARY_METRICS.map((k) => {
-    const v = values[k];
-    return [k, {
-      n: v.length,
-      mean: v.length ? v.reduce((a, b) => a + b, 0) / v.length : null,
-      // Valori estremi della settimana: rendono visibile quanto variano le
-      // singole notti attorno alla media, senza formule aggiuntive.
-      min: v.length ? Math.min(...v) : null,
-      max: v.length ? Math.max(...v) : null,
-      confidence: dataConfidence(v.length, days),
-    }];
-  }));
+  const stats = Object.fromEntries(SUMMARY_METRICS.map((k) => [k, describe(values[k], days)]));
 
   // Notte migliore/peggiore per qualità percepita: solo con almeno 3 notti
   // valutate e qualità non tutte uguali (altrimenti non c'è nulla da
@@ -305,24 +337,9 @@ export function periodSummary(entries, endDate, days = 7, { includeOutliers = fa
     }
   }
 
-  return { dates, days, nights, nightsWithData, coverage: dataConfidence(nightsWithData, days), stats, excluded, best, worst };
-}
-
-// Confronto tra le ultime 7 notti e le 7 precedenti. La differenza viene
-// calcolata solo se entrambe le finestre hanno almeno MIN_N_FOR_DELTA
-// valori per quella metrica: con 1–2 notti per parte un "+40 min" sarebbe
-// rumore presentato come cambiamento.
-export const MIN_N_FOR_DELTA = 3;
-
-export function weeklyComparison(entries, endDate, opts = {}) {
-  const current = periodSummary(entries, endDate, 7, opts);
-  const previous = periodSummary(entries, addDays(endDate, -7), 7, opts);
-  const deltas = Object.fromEntries(SUMMARY_METRICS.map((k) => {
-    const c = current.stats[k], p = previous.stats[k];
-    const ok = c.n >= MIN_N_FOR_DELTA && p.n >= MIN_N_FOR_DELTA;
-    return [k, ok ? c.mean - p.mean : null];
-  }));
-  return { current, previous, deltas };
+  // Distribuzione della qualità (scala ordinale 1–10): conteggi per valore.
+  const qualityCounts = Array.from({ length: 10 }, (_, i) => values.quality.filter((q) => q === i + 1).length);
+  return { dates, days, nights, nightsWithData, coverage: dataConfidence(nightsWithData, days), stats, excluded, best, worst, qualityCounts };
 }
 
 // --- Notti pronte per le analisi, con la stessa politica anomalie del
@@ -353,89 +370,6 @@ export function analysisNights(entries, { includeOutliers = false } = {}) {
   });
 }
 
-// Regolarità su una finestra di CALENDARIO (le notti con risveglio negli
-// ultimi `days` giorni, oggi incluso), non sulle ultime N notti registrate:
-// con dati radi, "ultime 28 notti" poteva mescolare notti lontane mesi.
-export const CONSISTENCY_MIN_NIGHTS = 5;
-export function consistencyForWindow(nights, endDate, days = 28) {
-  const start = addDays(endDate, -(days - 1));
-  const inWindow = nights.filter((n) => n.date >= start && n.date <= endDate);
-  const usable = inWindow.filter((n) => n.bedtime && n.wakeTime);
-  const excluded = inWindow.filter((n) => n.excludedSleep).length;
-  if (usable.length < CONSISTENCY_MIN_NIGHTS) return { shown: false, n: usable.length, excluded, days };
-  return {
-    shown: true, n: usable.length, excluded, days,
-    score: consistencyScore(usable.map((n) => n.bedtime), usable.map((n) => n.wakeTime)),
-  };
-}
-
-// Associazioni (§6). `direction` dice se a valori più alti della prima
-// variabile corrispondono in media valori più alti (+) o più bassi (−)
-// della seconda: senza, l'etichetta "Segnale moderato" non si interpreta.
-export const CORRELATION_PAIRS = [
-  { x: 'screenTimeTotal', y: 'durationMin' },
-  { x: 'screenTimeTotal', y: 'quality' },
-  { x: 'screenFreeMin', y: 'durationMin' },
-  { x: 'screenFreeMin', y: 'quality' },
-  // Risvegli (solo notti in cui sono stati indicati). Coppie scelte per non
-  // essere legate per costruzione: "minuti svegli e sonno effettivo"
-  // sarebbe negativa per definizione e non è inclusa.
-  { x: 'awakenings', y: 'quality' },
-  { x: 'awakeMinutes', y: 'quality' },
-  { x: 'awakenings', y: 'durationMin' },
-  { x: 'effectiveSleepMin', y: 'quality' },
-];
-// Per le coppie NON mostrate, `reason` dice perché: 'n' (meno di 14 notti),
-// 'variance' (una delle due variabili non varia mai), 'weak' (|r| < 0,2:
-// nessuna associazione LINEARE rilevabile, che non esclude altri tipi di
-// relazione). `from`/`to`: periodo delle notti usate.
-export function correlationResults(nights) {
-  return CORRELATION_PAIRS.map(({ x, y }) => {
-    const used = nights.filter((n) => n[x] != null && n[y] != null);
-    const pairs = used.map((n) => [n[x], n[y]]);
-    const r = pearsonR(pairs);
-    const sig = correlationSignal(pairs.length, r);
-    let reason = null;
-    if (!sig.shown) reason = pairs.length < 14 ? 'n' : r == null ? 'variance' : 'weak';
-    return {
-      x, y, ...sig, reason,
-      direction: sig.shown ? (sig.r > 0 ? 'positive' : 'negative') : null,
-      from: used.length ? used[0].date : null,
-      to: used.length ? used[used.length - 1].date : null,
-    };
-  });
-}
-
-// Notti migliori (§8). Soglia = 75° percentile della qualità personale
-// (rango più vicino) E almeno 7/10; le notti a pari merito con la soglia
-// entrano TUTTE nel gruppo, così il risultato non dipende dall'ordine dei
-// dati. Minimo 8 notti per gruppo — anche per "le altre" e per ciascuna
-// metrica confrontata: con 2–3 valori per parte Cohen's d sarebbe rumore.
-export const OPTIMAL_MIN_TOTAL = 30;
-export const OPTIMAL_MIN_GROUP = 8;
-export function optimalZone(nights) {
-  const rated = nights.filter((n) => n.quality != null);
-  if (rated.length < OPTIMAL_MIN_TOTAL) return { shown: false, reason: 'total', n: rated.length };
-  const asc = rated.map((n) => n.quality).sort((a, b) => a - b);
-  const p75 = asc[Math.ceil(0.75 * asc.length) - 1];
-  const threshold = Math.max(p75, 7);
-  const best = rated.filter((n) => n.quality >= threshold);
-  const rest = rated.filter((n) => n.quality < threshold);
-  const base = { n: rated.length, threshold, bestN: best.length, restN: rest.length };
-  if (best.length < OPTIMAL_MIN_GROUP) return { shown: false, reason: 'best', ...base };
-  if (rest.length < OPTIMAL_MIN_GROUP) return { shown: false, reason: 'rest', ...base };
-  const results = ['durationMin', 'effectiveSleepMin', 'awakeMinutes', 'screenFreeMin', 'screenTimeTotal'].map((key) => {
-    const g1 = best.map((n) => n[key]).filter((v) => v != null);
-    const g2 = rest.map((n) => n[key]).filter((v) => v != null);
-    if (g1.length < OPTIMAL_MIN_GROUP || g2.length < OPTIMAL_MIN_GROUP) return { key, shown: false, reason: 'n', n1: g1.length, n2: g2.length };
-    const res = cohensD(g1, g2);
-    if (!res) return { key, shown: false, reason: 'variance', n1: g1.length, n2: g2.length };
-    const signalLabel = effectLabel(Math.abs(res.d));
-    return { key, shown: !!signalLabel, reason: signalLabel ? null : 'small', signalLabel, m1: res.m1, m2: res.m2, d: res.d, n1: g1.length, n2: g2.length };
-  });
-  return { shown: true, ...base, results };
-}
-
 export function daysInMonth(year, month) { return new Date(year, month + 1, 0).getDate(); }
 export function firstWeekdayOfMonth(year, month) {
   const jsDay = new Date(year, month, 1).getDay();
@@ -456,9 +390,17 @@ export function buildCSV(entries) {
     'is_outlier_screen_time', 'outlier_acknowledged_screen_time',
     // Aggiunte nello schema 3, in coda per non spostare le colonne esistenti.
     'awakenings', 'awake_minutes', 'estimated_sleep_minutes',
+    // Schema 4, sempre in coda. sleep_onset ripete bedtime (= addormentamento)
+    // con un nome non ambiguo; screen_time_date_status: verified / presumed /
+    // unknown; prov_<campo>: provenienza (unknown se non classificata).
+    'sleep_onset', 'screen_time_date', 'screen_time_date_status',
+    'in_bed_time', 'sleep_attempt', 'day_type', 'day_type_source',
+    'late_caffeine', 'alcohol', 'stress', 'unusual_night', 'last_screen_use_source',
+    ...PROVENANCE_FIELDS.map((f) => `prov_${f}`),
   ];
   const val = (v) => (v == null ? '' : v);
   const flag = (v) => (v ? 'true' : 'false');
+  const tri = (v) => (typeof v === 'boolean' ? String(v) : '');
   const rows = Object.keys(entries).sort().map((date) => {
     const e = entries[date];
     const m = computeNightMetrics(e, date);
@@ -470,6 +412,10 @@ export function buildCSV(entries) {
       flag(e.is_outlier_bedtime), flag(e.outlier_acknowledged_bedtime),
       flag(e.is_outlier_screen_time), flag(e.outlier_acknowledged_screen_time),
       awakeningsKnown(e) ? e.awakenings : '', awakeningsKnown(e) ? e.awakeMinutes : '', val(m.effectiveSleepMin),
+      val(e.bedtime), ...(() => { const ref = screenTimeReference(e); return ref ? [val(ref.date), ref.status] : ['', '']; })(),
+      val(e.inBedTime), val(e.sleepAttempt), val(e.dayType), val(e.dayType ? e.dayTypeSource : null),
+      tri(e.lateCaffeine), tri(e.alcohol), tri(e.stress), tri(e.unusualNight), val(e.lastScreenUseSource),
+      ...PROVENANCE_FIELDS.map((f) => (e[f] == null || e[f] === '' ? '' : provenanceOf(e, f))),
     ].join(',');
   });
   return [header.join(','), ...rows].join('\n');
@@ -488,69 +434,81 @@ export function downloadCSV(entries) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-// --- Sleep Consistency Score: statistica circolare (vedi ANALYTICS_METHODOLOGY.md §4) ---
+// --- Statistica circolare degli orari (ANALYTICS_METHODOLOGY.md §4) ---
+// Deviazione standard circolare: θ = 2π·t/1440; R = |media(e^{iθ})|;
+// SD = √(−2 ln R) · 1440/2π minuti. Per orari concentrati coincide con la
+// SD lineare, ma gestisce la mezzanotte (23:30 e 00:30 → 30 min).
+// Se R ≈ 0 (orari sparsi su tutte le 24 ore) la SD non è definita: null.
 export function circularStdMinutes(times) {
   if (!times || times.length === 0) return null;
+  const { R } = circularMoments(times);
+  if (R <= 1e-4) return null;
+  return Math.sqrt(-2 * Math.log(R)) * (1440 / (2 * Math.PI));
+}
+// Orario medio circolare (HH:MM) o null se non definito.
+export function circularMeanHHMM(times) {
+  if (!times || times.length === 0) return null;
+  const { C, S, R } = circularMoments(times);
+  if (R <= 1e-4) return null;
+  const mins = Math.round((((Math.atan2(S, C) / (2 * Math.PI)) * 1440) % 1440 + 1440) % 1440) % 1440;
+  return minutesToHHMM(mins);
+}
+function circularMoments(times) {
   const angles = times.map((t) => (timeToMinutesOfDay(t) / 1440) * 2 * Math.PI);
   const C = angles.reduce((s, a) => s + Math.cos(a), 0) / angles.length;
   const S = angles.reduce((s, a) => s + Math.sin(a), 0) / angles.length;
-  const R = Math.sqrt(C * C + S * S);
-  if (R <= 0.0001) return 720;
-  return Math.sqrt(-2 * Math.log(R)) * (1440 / (2 * Math.PI));
+  return { C, S, R: Math.sqrt(C * C + S * S) };
 }
 
-export function consistencyScore(bedtimes, waketimes) {
-  const sBed = circularStdMinutes(bedtimes);
-  const sWake = circularStdMinutes(waketimes);
-  if (sBed == null || sWake == null) return null;
-  const avg = (sBed + sWake) / 2;
-  return Math.max(0, Math.round(100 - (avg / 90) * 100));
+// --- Statistiche descrittive (ANALYTICS_METHODOLOGY.md §5) ---
+// Quantile con interpolazione lineare tra i valori ordinati (metodo "tipo 7"
+// di Hyndman e Fan, quello predefinito di R e dei fogli di calcolo).
+export function quantile(sorted, p) {
+  if (!sorted.length) return null;
+  const h = (sorted.length - 1) * p, lo = Math.floor(h);
+  return lo + 1 < sorted.length ? sorted[lo] + (h - lo) * (sorted[lo + 1] - sorted[lo]) : sorted[lo];
+}
+// Mediana da MEDIAN_MIN_NIGHTS valori, IQR da IQR_MIN_NIGHTS: sotto quelle
+// soglie si mostrano i singoli valori, non un riassunto.
+export function describe(values, days) {
+  const v = [...values].sort((a, b) => a - b);
+  const n = v.length;
+  return {
+    n,
+    values: v,
+    median: n >= CFG.MEDIAN_MIN_NIGHTS ? quantile(v, 0.5) : null,
+    q1: n >= CFG.IQR_MIN_NIGHTS ? quantile(v, 0.25) : null,
+    q3: n >= CFG.IQR_MIN_NIGHTS ? quantile(v, 0.75) : null,
+    min: n ? v[0] : null,
+    max: n ? v[n - 1] : null,
+    confidence: dataConfidence(n, days),
+  };
 }
 
-// --- Correlation Analysis: Pearson + soglie n/|r| (vedi ANALYTICS_METHODOLOGY.md §6) ---
-export function pearsonR(pairs) {
-  const n = pairs.length;
-  if (n < 2) return null;
-  const xs = pairs.map((p) => p[0]), ys = pairs.map((p) => p[1]);
-  const mx = xs.reduce((a, b) => a + b, 0) / n, my = ys.reduce((a, b) => a + b, 0) / n;
-  let num = 0, dx2 = 0, dy2 = 0;
-  for (let i = 0; i < n; i++) { const dx = xs[i] - mx, dy = ys[i] - my; num += dx * dy; dx2 += dx * dx; dy2 += dy * dy; }
-  if (dx2 === 0 || dy2 === 0) return null;
-  return num / Math.sqrt(dx2 * dy2);
-}
-
-export function correlationSignal(n, r) {
-  if (n < 14 || r == null) return { shown: false, n };
-  const absR = Math.abs(r);
-  if (absR < 0.2) return { shown: false, n };
-  let signalLabel, warn = false;
-  if (n < 30) {
-    if (absR < 0.4) signalLabel = 'Segnale debole';
-    else if (absR < 0.6) { signalLabel = 'Segnale moderato'; warn = true; }
-    else { signalLabel = 'Segnale forte'; warn = true; }
-  } else {
-    if (absR < 0.4) signalLabel = 'Segnale debole';
-    else if (absR < 0.6) signalLabel = 'Segnale moderato';
-    else signalLabel = 'Segnale forte';
+// --- Regolarità degli orari (ANALYTICS_METHODOLOGY.md §4) ---
+// Finestra di CALENDARIO: le notti con risveglio negli ultimi
+// REGULARITY_WINDOW_DAYS giorni, oggi incluso. Notti usate: addormentamento
+// e risveglio presenti e coerenti; escluse (con il motivo) le anomalie
+// confermate, salvo includeOutliers. Nessun punteggio: due SD in minuti.
+export function regularityForWindow(entries, endDate, { includeOutliers = false } = {}) {
+  const days = CFG.REGULARITY_WINDOW_DAYS;
+  const from = addDays(endDate, -(days - 1));
+  const used = [], excluded = [];
+  for (let i = days - 1; i >= 0; i--) {
+    const date = addDays(endDate, -i);
+    const e = entries[date];
+    if (!e || isEmpty(e.bedtime) || isEmpty(e.wakeTime)) continue;
+    if (computeNightMetrics(e, date).durationError) { excluded.push({ date, reason: 'incoherent' }); continue; }
+    if (e.is_outlier_bedtime && !includeOutliers) { excluded.push({ date, reason: 'outlier' }); continue; }
+    used.push(e);
   }
-  return { shown: true, n, r, signalLabel, warn };
-}
-
-// --- Optimal Zone: Cohen's d (vedi ANALYTICS_METHODOLOGY.md §8) ---
-export function cohensD(group1, group2) {
-  const n1 = group1.length, n2 = group2.length;
-  if (n1 < 2 || n2 < 2) return null;
-  const m1 = group1.reduce((a, b) => a + b, 0) / n1, m2 = group2.reduce((a, b) => a + b, 0) / n2;
-  const v1 = group1.reduce((s, x) => s + (x - m1) ** 2, 0) / (n1 - 1);
-  const v2 = group2.reduce((s, x) => s + (x - m2) ** 2, 0) / (n2 - 1);
-  const pooledSD = Math.sqrt(((n1 - 1) * v1 + (n2 - 1) * v2) / (n1 + n2 - 2));
-  if (pooledSD === 0) return null;
-  return { d: (m1 - m2) / pooledSD, m1, m2 };
-}
-
-export function effectLabel(absD) {
-  if (absD < 0.2) return null;
-  if (absD < 0.5) return 'Segnale debole';
-  if (absD < 0.8) return 'Segnale moderato';
-  return 'Segnale forte';
+  const n = used.length, min = CFG.REGULARITY_MIN_NIGHTS;
+  const base = { from, to: endDate, days, n, min, excluded };
+  if (n < min) return { shown: false, ...base };
+  const onsets = used.map((e) => e.bedtime), wakes = used.map((e) => e.wakeTime);
+  return {
+    shown: true, ...base,
+    sdOnset: circularStdMinutes(onsets), sdWake: circularStdMinutes(wakes),
+    meanOnset: circularMeanHHMM(onsets), meanWake: circularMeanHHMM(wakes),
+  };
 }

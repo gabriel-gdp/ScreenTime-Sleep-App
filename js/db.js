@@ -7,7 +7,14 @@ const DB_NAME = 'sleep-screen-lab';
 // v3: campi facoltativi dei risvegli notturni (awakenings, awakeMinutes).
 //     Nessuna trasformazione dei record: le notti già salvate restano con
 //     i risvegli "non indicati" (mai zero assegnato d'ufficio).
-const DB_VERSION = 3;
+// v4: tentativo di dormire, coricamento, tipo di giorno, indicatori di
+//     contesto, giorno di riferimento dello Screen Time, provenienza per
+//     campo (record.js). Di nuovo nessuna trasformazione: le notti
+//     esistenti restano identiche, con provenienza "unknown" implicita e
+//     giorno dello Screen Time "presunto" (calcolato, mai scritto).
+//     Prima dell'aggiornamento l'app chiede un backup verificato e dopo
+//     confronta i record (app.js: schermata di aggiornamento).
+const DB_VERSION = 4;
 const STORE = 'entries';
 // Versione dello schema dei record, scritta nei backup JSON: un backup
 // creato con uno schema precedente viene migrato con le stesse funzioni
@@ -47,8 +54,9 @@ export function migrateRecordsV1toV2(records) {
 export function migrateRecords(records, fromVersion) {
   let out = records;
   if (fromVersion < 2) out = migrateRecordsV1toV2(out);
-  // v2 → v3: identità. I record v2 non hanno informazioni sui risvegli e
-  // devono restare così (dato sconosciuto, non "zero risvegli").
+  // v2 → v3 e v3 → v4: identità. I record precedenti non hanno
+  // informazioni sui risvegli né sui campi dello schema 4 e devono restare
+  // così (dato sconosciuto, mai un valore assegnato d'ufficio).
   return out;
 }
 
@@ -64,6 +72,29 @@ function migrateV1toV2(store) {
 }
 
 let dbPromise = null;
+
+// Legge lo stato del database SENZA aggiornarlo: versione attuale e, se è
+// precedente a DB_VERSION, una copia di tutti i record. Serve a proporre il
+// backup prima della migrazione e a confrontare i dati prima e dopo.
+// Ritorna { version, needsUpgrade, records }. Un database inesistente non
+// richiede aggiornamento (installazione nuova).
+export function inspectDatabase() {
+  return new Promise((resolve, reject) => {
+    let created = false;
+    const req = indexedDB.open(DB_NAME); // senza versione: nessun upgrade
+    req.onupgradeneeded = () => { created = true; }; // non esisteva
+    req.onerror = () => reject(req.error);
+    req.onsuccess = () => {
+      const db = req.result;
+      const version = db.version;
+      const done = (records) => { db.close(); resolve({ version, needsUpgrade: !created && version < DB_VERSION && records.length > 0, records }); };
+      if (created || version >= DB_VERSION || !db.objectStoreNames.contains(STORE)) { done([]); return; }
+      const g = db.transaction(STORE, 'readonly').objectStore(STORE).getAll();
+      g.onsuccess = () => done(g.result);
+      g.onerror = () => { db.close(); reject(g.error); };
+    };
+  });
+}
 
 function openDB() {
   if (dbPromise) return dbPromise;

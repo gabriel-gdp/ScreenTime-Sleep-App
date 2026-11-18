@@ -7,8 +7,13 @@
 // positiva tra tempo senza schermo e qualità, weekend più tardivi, qualche
 // notte mancante o parziale, risvegli notturni (assenti nelle notti più
 // vecchie, come per i dati storici) e due anomalie confermate, per mostrare come il
-// tool le tratta. Non rappresentano dati reali di nessuno.
+// tool le tratta. Le notti recenti hanno anche i campi dello schema 4
+// (tentativo di dormire, tipo di giorno, indicatori, provenienza
+// "prospective"); le 15 più vecchie no, come i dati storici reali
+// (provenienza sconosciuta, giorno dello Screen Time presunto).
+// Non rappresentano dati reali di nessuno.
 import { addDays, pad, sleepComplete } from './analytics.js';
+import { templateDayType, CONTEXT_FIELDS, PROVENANCE_FIELDS } from './record.js';
 
 function mulberry32(seed) {
   return function () {
@@ -26,6 +31,8 @@ export function generateDemoEntries(today, nights = 60, seed = 20261103) {
   const rand = mulberry32(seed);
   // Flusso separato per i risvegli: non cambia gli altri valori della demo.
   const randAw = mulberry32(seed + 1);
+  // Flusso separato anche per i campi dello schema 4.
+  const randS = mulberry32(seed + 2);
   const gauss = () => (rand() + rand() + rand() - 1.5) * 1.15; // ≈ N(0,1), limitata
   const entries = {};
 
@@ -59,8 +66,35 @@ export function generateDemoEntries(today, nights = 60, seed = 20261103) {
       e.awakenings = clamp(Math.round((7.5 - quality) * 0.7 + (randAw() - 0.5) * 1.6), 0, 5);
       e.awakeMinutes = e.awakenings ? clamp(Math.round(e.awakenings * (6 + randAw() * 14)), 3, 120) : 0;
     } else randAw();
-    if (r > 0.95) { delete e.bedtime; delete e.wakeTime; delete e.quality; delete e.awakenings; delete e.awakeMinutes; } // solo sera
-    else if (r > 0.92) { delete e.screenTimeTotal; delete e.lastScreenUse; } // solo mattina
+    const recent = i < nights - 15;
+    const sr = [randS(), randS(), randS(), randS(), randS(), randS(), randS()];
+    if (recent) {
+      // Tentativo di dormire: di solito dopo l'ultimo utilizzo; in circa una
+      // notte su quattro lo schermo è stato usato anche dopo il tentativo.
+      const useAfter = sr[0] < 0.25 && screenFree <= 60;
+      const attemptMin = useAfter ? bedMin - screenFree - (5 + Math.round(sr[1] * 15)) : bedMin - Math.round(5 + sr[1] * Math.min(25, screenFree - 1));
+      e.sleepAttempt = toHHMM(attemptMin);
+      e.dayType = templateDayType(date);
+      e.dayTypeSource = sr[2] < 0.8 ? 'template' : 'confirmed';
+      CONTEXT_FIELDS.forEach((f, k) => {
+        const x = sr[3 + k];
+        if (x < 0.4) return; // non indicato
+        e[f] = x > (f === 'unusualNight' ? 0.97 : 0.85);
+      });
+      if (typeof e.lateCaffeine === 'boolean' || typeof e.alcohol === 'boolean') {
+        e.contextDefs = {};
+        if (typeof e.lateCaffeine === 'boolean') e.contextDefs.lateCaffeineFrom = '15:00';
+        if (typeof e.alcohol === 'boolean') e.contextDefs.alcoholFrom = '18:00';
+      }
+      e.screenTimeDate = addDays(date, -1); e.screenTimeDateStatus = 'verified'; e.screenTimeDateRule = 'entry_label';
+      e.lastScreenUseSource = sr[0] < 0.5 ? 'button' : 'manual';
+    }
+    if (r > 0.95) { // solo sera
+      ['bedtime', 'wakeTime', 'quality', 'awakenings', 'awakeMinutes', 'sleepAttempt', 'dayType', 'dayTypeSource', 'contextDefs', ...CONTEXT_FIELDS].forEach((f) => delete e[f]);
+    } else if (r > 0.92) { // solo mattina
+      ['screenTimeTotal', 'lastScreenUse', 'screenTimeDate', 'screenTimeDateStatus', 'screenTimeDateRule', 'lastScreenUseSource'].forEach((f) => delete e[f]);
+    }
+    if (recent) addMeta(e);
     entries[date] = e;
   }
 
@@ -80,6 +114,20 @@ export function generateDemoEntries(today, nights = 60, seed = 20261103) {
 
   // La notte appena trascorsa resta da completare, per provare l'inserimento.
   const last = entries[today];
-  if (last && sleepComplete(last)) { delete last.bedtime; delete last.wakeTime; delete last.quality; delete last.awakenings; delete last.awakeMinutes; }
+  if (last && sleepComplete(last)) {
+    ['bedtime', 'wakeTime', 'quality', 'awakenings', 'awakeMinutes', 'sleepAttempt', 'inBedTime', 'dayType', 'dayTypeSource', 'contextDefs', ...CONTEXT_FIELDS].forEach((f) => delete last[f]);
+    if (last.meta) addMeta(last);
+  }
   return entries;
+}
+
+// Provenienza "prospective" per ogni campo presente, come per una notte
+// compilata la mattina stessa.
+function addMeta(e) {
+  const at = new Date(`${e.date}T${e.wakeTime || '08:00'}:00`);
+  at.setMinutes(at.getMinutes() + 20);
+  const iso = at.toISOString();
+  const fields = {};
+  PROVENANCE_FIELDS.forEach((f) => { if (e[f] != null && e[f] !== '') fields[f] = { provenance: 'prospective', enteredAt: iso, provenanceSetBy: 'auto', provenanceSetAt: iso }; });
+  e.meta = { createdAt: iso, updatedAt: iso, fields };
 }
