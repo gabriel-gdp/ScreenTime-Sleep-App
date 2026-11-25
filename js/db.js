@@ -181,6 +181,39 @@ export function getPref(key, fallback) {
     return fallback;
   }
 }
+// La scrittura restituisce sempre l'esito, così chi chiama non dichiara mai
+// "salvato" senza conferma:
+//   { ok: true }                         scritta e riletta uguale
+//   { ok: false, reason: 'invalid' }     valore non testuale (nulla scritto)
+//   { ok: false, reason: 'unavailable' } localStorage assente o bloccato
+//   { ok: false, reason: 'quota' }       spazio esaurito
+//   { ok: false, reason: 'failed' }      altro errore o rilettura diversa
+function prefStore() {
+  try { return typeof localStorage === 'undefined' || !localStorage ? null : localStorage; } catch (e) { return null; }
+}
+const isQuotaError = (e) => !!e && (e.name === 'QuotaExceededError' || e.name === 'NS_ERROR_DOM_QUOTA_REACHED' || e.code === 22 || e.code === 1014);
 export function setPref(key, value) {
-  try { localStorage.setItem('ssl_' + key, value); } catch (e) { /* ignore */ }
+  if (typeof value !== 'string') return { ok: false, reason: 'invalid' };
+  const ls = prefStore();
+  if (!ls) return { ok: false, reason: 'unavailable' };
+  try {
+    ls.setItem('ssl_' + key, value);
+  } catch (e) {
+    return { ok: false, reason: isQuotaError(e) ? 'quota' : 'failed', error: e };
+  }
+  try {
+    return ls.getItem('ssl_' + key) === value ? { ok: true } : { ok: false, reason: 'failed' };
+  } catch (e) {
+    return { ok: false, reason: 'failed', error: e };
+  }
+}
+export function removePref(key) {
+  const ls = prefStore();
+  if (!ls) return { ok: false, reason: 'unavailable' };
+  try {
+    ls.removeItem('ssl_' + key);
+    return ls.getItem('ssl_' + key) === null ? { ok: true } : { ok: false, reason: 'failed' };
+  } catch (e) {
+    return { ok: false, reason: 'failed', error: e };
+  }
 }

@@ -36,11 +36,15 @@ export const ANALYSIS_CONFIG = Object.freeze({
   ROLLING_WINDOW_NIGHTS: 7,
   ROLLING_MIN_VALUES: 4,
   VARIABILITY_HISTORY_WEEKS: 8,
+  VARIABILITY_WINDOW_WEEKS: 12,       // settimane precedenti considerate (al massimo)
+  THEIL_SEN_MIN_NIGHTS: 28,            // pendenza descrittiva solo da 28 notti
 
   // --- Regolarità ---
   REGULARITY_WINDOW_DAYS: 28,
   REGULARITY_MIN_NIGHTS: 14,
   SJL_MIN_NIGHTS_PER_TYPE: 4,
+  SRI_WINDOW_DAYS: 28,                 // SRI da diario: 4 settimane intere
+  SRI_MIN_PAIRS: 14,                   // coppie di notti consecutive valide
   REGULARITY_MIN_NIGHTS_PER_TYPE: 7,
 
   // --- Notti insolite (indicazione visiva) ---
@@ -62,6 +66,16 @@ export const ANALYSIS_CONFIG = Object.freeze({
   HABITUAL_MIN_VALUES: 14,
   PRESLEEP_WINDOW_MIN: 60,
   BH_Q: 0.10,
+
+  // --- Personalizzazione (Profilo e contesto, §15) ---
+  ALARM_NEAR_MIN: 15,                  // risveglio "vicino" alla sveglia dichiarata: entro ±15 min
+  CONTEXT_WINDOW_DAYS: 365,            // notti considerate nei confronti tra periodi
+  CONTEXT_GROUP_MIN_NIGHTS: 7,         // notti minime per mostrare un gruppo
+  CONTEXT_HIGHLIGHT_MIN_NIGHTS: 14,    // notti minime per parlare di "differenza chiara"
+  SUGGESTION_WINDOW_DAYS: 14,          // finestra degli spunti legati agli obiettivi
+  SUGGESTION_MIN_NIGHTS: 7,            // notti valide minime per uno spunto
+  SUGGESTION_MISS_SHARE: 0.5,          // spunto se l'obiettivo manca in almeno metà delle notti
+  SLEEP_NEED_GAP_MIN: 30,              // differenza minima dal fabbisogno percepito
 
   // --- Definizioni operative dei chip (valori iniziali, modificabili) ---
   LATE_CAFFEINE_FROM: '15:00',

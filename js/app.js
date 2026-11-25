@@ -1,4 +1,4 @@
-import { getAllEntries, saveEntry, deleteEntry, importEntries, getPref, setPref, SCHEMA_VERSION, migrateRecords, inspectDatabase } from './db.js';
+import { getAllEntries, saveEntry, deleteEntry, importEntries, getPref, setPref as writePref, removePref, SCHEMA_VERSION, migrateRecords, inspectDatabase } from './db.js';
 import { buildBackup, backupFilename, parseBackup, planImport, sameRecord, downloadFile, MAX_BACKUP_BYTES } from './backup.js';
 import {
   pad, todayISO, addDays, nowHHMM, computeNightMetrics, dayStatus,
@@ -12,6 +12,11 @@ import {
 import { ANALYSIS_CONFIG as CFG } from './config.js';
 import { generateDemoEntries, DEMO_NIGHTS } from './demo.js';
 import { SOURCES, LINKS, STATUS, SUMMARY, BIBLIOGRAPHY_SOURCE } from './bibliography.js';
+// Profilo e contesto (archivio separato `sleep-screen-context`): solo
+// personalizzazione e contestualizzazione, mai letti da analisi, backup
+// delle notti o CSV. Interfaccia in ui-profile.js.
+import { sriHTML, trendSectionHTML } from './ui-trends.js';
+import { initContext, renderProfile as renderProfileScreen, contextGreetingName, contextBirthday, nightContextHTML, contextTrendHTML } from './ui-profile.js';
 import {
   FIELD_LABELS, PROVENANCE_GROUPS, PROVENANCE_LABELS, SCREEN_STATUS_LABELS, MANUAL_MAX_DAYS_BEFORE,
   provenanceSummary, fieldsOfGroups, planProvenance, planScreenDate, manualScreenDate, verifyOperation,
@@ -42,6 +47,7 @@ const ICONS = {
   chevronRight: svg('<polyline points="9 18 15 12 9 6"/>'),
   download: svg('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>'),
   upload: svg('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>'),
+  user: svg('<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>'),
 };
 
 // Il record di una notte (campi, bozze, regole dei risvegli) è definito in
@@ -82,6 +88,10 @@ const state = {
   period: [7, 28, 90].includes(Number(getPref('trend_period', '7'))) ? Number(getPref('trend_period', '7')) : 7,
   // Filtri delle descrizioni (Fase 5.1): preferenza di questo dispositivo.
   filters: readFilters(),
+  // Misura scelta in "Andamento di una misura" (L3): preferenza locale.
+  trendVariable: getPref('trend_variable', 'duration'),
+  // Navigazione nel tempo del riepilogo (0 = periodo che finisce oggi).
+  periodOffset: 0,
   // Ripristino da backup in corso: null, { error }, { records, meta, mode,
   // confirm, busy } oppure { done, ok, text }.
   importState: null,
@@ -94,6 +104,8 @@ const state = {
   },
   // Aggiornamento del database in attesa (schermata con backup verificato).
   migration: null,
+  // Preferenza locale non salvata (setPref fallito): mostra un avviso.
+  prefError: null,
   // Dati inseriti oltre la finestra di tempestività: domanda sull'origine.
   askProvenance: false,
   // Strumento "Origine dei dati" (Impostazioni): null oppure
@@ -146,6 +158,11 @@ async function startApp() {
   state.selectedDate = defaultNight();
   render();
   if (!state.loadError) checkReminder();
+  // Archivio del Profilo e del contesto: facoltativo, non blocca il Diario.
+  initContext({
+    getPref, removePref, todayISO,
+    onChange: () => { if (!state.migration && state.loaded) render(); },
+  }).catch((e) => console.warn('Contesto non disponibile', e));
   registerServiceWorker();
   requestPersistentStorage();
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') onResume(); });
@@ -195,7 +212,8 @@ function registerServiceWorker() {
   // Una nuova versione ha preso il controllo. Se non c'è nulla in sospeso
   // si ricarica subito; se ci sono bozze o un salvataggio in corso non si
   // interrompe l'utente: compare un avviso e si aggiorna quando vuole
-  // (le bozze sono comunque al sicuro in localStorage).
+  // (le bozze restano in localStorage; se la scrittura fallisce lo dice
+  // l'avviso di setPref).
   navigator.serviceWorker.addEventListener('controllerchange', () => {
     if (!hadController) return;
     if (!hasDirtyDrafts() && !state.saving) { applyUpdate(); return; }
@@ -320,6 +338,34 @@ function applyTheme(theme) {
 }
 const tabContent = () => root.querySelector('#tab-content');
 
+// Ogni preferenza passa da qui: se la scrittura non riesce (spazio
+// esaurito, archiviazione bloccata) compare un avviso persistente, invece
+// di far credere che la scelta sia stata salvata.
+const PREF_ERROR_TEXT = {
+  quota: 'lo spazio di archiviazione del browser è esaurito',
+  unavailable: 'il browser blocca l\'archiviazione locale (per esempio in navigazione privata)',
+  failed: 'la scrittura non è riuscita',
+  invalid: 'il valore non è valido',
+};
+function setPref(key, value) {
+  const r = writePref(key, value);
+  if (!r.ok) {
+    console.warn('Preferenza non salvata', key, r.reason);
+    state.prefError = { key, reason: r.reason };
+    showPrefErrorBanner();
+  }
+  return r;
+}
+function prefErrorBannerHTML() {
+  if (!state.prefError) return '';
+  return `<div class="demo-banner pref-error" role="alert" id="pref-error">${ICONS.alert}<span><strong>Impostazioni non salvate</strong>: ${PREF_ERROR_TEXT[state.prefError.reason] || PREF_ERROR_TEXT.failed}. Le scelte e le bozze non salvate valgono finché l'app resta aperta; le notti già salvate non sono toccate.</span></div>`;
+}
+function showPrefErrorBanner() {
+  if (!root || root.querySelector('#pref-error')) return;
+  const header = root.querySelector('header');
+  if (header) header.insertAdjacentHTML('afterend', prefErrorBannerHTML());
+}
+
 // Il rendering ricrea i controlli: senza questo, dopo ogni tocco su una
 // notte, su "Salva" o su una scheda il focus finiva sul documento e chi
 // usa tastiera o VoiceOver perdeva la posizione. Si memorizza "quale"
@@ -355,16 +401,25 @@ function fadeSaveMsgAfter(date) {
 }
 
 // ---------- Header + Nav ----------
-function renderHeader() {
+function renderHeader({ profileButton = true } = {}) {
   const dateLabel = new Date().toLocaleDateString('it-IT', { weekday: 'long', day: 'numeric', month: 'long' });
   const nextTheme = state.theme === 'light' ? 'scuro' : 'chiaro';
+  // Personalizzazione: saluto con il nome scelto nel profilo (se c'è).
+  const name = contextGreetingName();
+  const greeting = name
+    ? `<span class="greeting" id="header-greeting">${contextBirthday(todayISO()) ? 'Buon compleanno' : 'Ciao'}, ${escapeHTML(name)}</span> · `
+    : '';
+  const onProfile = state.tab === 'profile';
   return `
     <header class="header">
       <div>
         <h1 class="app-title serif">Diario del sonno</h1>
-        <p class="date">${dateLabel}</p>
+        <p class="date">${greeting}${dateLabel}</p>
       </div>
-      <button type="button" class="icon-btn" id="theme-toggle" aria-label="Passa al tema ${nextTheme}">${state.theme === 'light' ? ICONS.moon : ICONS.sun}</button>
+      <div class="header-actions">
+        ${profileButton ? `<button type="button" class="icon-btn ${onProfile ? 'active' : ''}" id="profile-btn" aria-label="Profilo${name ? ` di ${escapeHTML(name)}` : ''}" ${onProfile ? 'aria-current="page"' : ''}>${ICONS.user}</button>` : ''}
+        <button type="button" class="icon-btn" id="theme-toggle" aria-label="Passa al tema ${nextTheme}">${state.theme === 'light' ? ICONS.moon : ICONS.sun}</button>
+      </div>
     </header>`;
 }
 
@@ -645,6 +700,7 @@ function renderToday() {
     </section>
 
     <section class="summary" id="summary"></section>
+    <div id="night-context" aria-live="off"></div>
 
     <div id="provenance-ask"></div>
     <button type="button" class="btn-primary" id="save-btn" aria-describedby="save-status"></button>
@@ -738,6 +794,8 @@ function updateTodayDerived() {
   // Per la notte di stasera durata e tempo senza schermo non sono ancora
   // calcolabili (servono gli orari di domattina): niente riquadri vuoti.
   $('#summary').innerHTML = future ? '' : summaryHTML(v);
+  const nc = $('#night-context');
+  if (nc) nc.innerHTML = future || state.demo ? '' : nightContextHTML(draftRecord(date), date, escapeHTML);
   const setMsg = (id, text, kind) => { const el = $(id); if (el) el.innerHTML = text ? msgHTML(text, kind) : ''; };
   setMsg('#f-screentime-msg', v.screenW, 'warn');
   setMsg('#f-bedtime-msg', v.bedW, 'warn');
@@ -1301,16 +1359,20 @@ function habitualShareHTML(cur, ents) {
     ? `<p class="n habitual-missing">Solito orario non calcolabile con questi filtri (servono almeno ${CFG.HABITUAL_MIN_VALUES} notti valide nelle ${CFG.HABITUAL_WINDOW_NIGHTS} precedenti)${lastNoH ? `: ${lastNoH.n}/${lastNoH.min} nell'ultima notte del periodo` : ''}${n ? `; ${nightsWord(noH)} senza solito orario` : ''}.</p>` : '';
   return (n ? `<p class="n habitual-share">schermo nell'ora prima del tuo solito orario: ${yes} su ${nightsWord(n)}</p>` : '') + missing;
 }
+// Fine del periodo mostrato nel riepilogo, nel grafico degli orari e
+// nell'andamento: oggi, oppure periodi precedenti (navigazione nel tempo).
+function periodEnd() { return addDays(todayISO(), -state.periodOffset * state.period); }
 function actogramSectionHTML() {
   const days = state.period;
   const dates = [];
-  for (let i = days - 1; i >= 0; i--) dates.push(addDays(todayISO(), -i));
+  for (let i = days - 1; i >= 0; i--) dates.push(addDays(periodEnd(), -i));
   return actogramHTML(filteredEntries(), dates);
 }
 function periodHTML() {
   const days = state.period;
   const filt = filteredEntries();
-  const cur = periodSummary(filt.entries, todayISO(), days, { includeOutliers: state.includeOutliers });
+  const end = periodEnd();
+  const cur = periodSummary(filt.entries, end, days, { includeOutliers: state.includeOutliers });
   const anyData = cur.nightsWithData > 0;
   const bestWorst = cur.best ? `
     <div class="best-worst">
@@ -1327,7 +1389,7 @@ function periodHTML() {
     </div>` : '';
 
   const allExcluded = state.includeOutliers
-    ? periodSummary(filt.entries, todayISO(), days).excluded
+    ? periodSummary(filt.entries, end, days).excluded
     : cur.excluded;
   const outlierNote = allExcluded.length ? `
     <details class="outlier-note">
@@ -1342,7 +1404,7 @@ function periodHTML() {
     <section class="week" aria-labelledby="week-title">
       <div class="section-title-row">
         <div>
-          <h2 class="section-h serif" id="week-title">Ultime ${days} notti</h2>
+          <h2 class="section-h serif" id="week-title">${state.periodOffset ? `${days} notti` : `Ultime ${days} notti`}</h2>
           <p class="section-sub">${shortRange(cur.dates)}</p>
         </div>
         <span class="badge ${cur.coverage.level}" title="Notti con almeno un dato">Copertura ${cur.nightsWithData}/${days}</span>
@@ -1350,6 +1412,12 @@ function periodHTML() {
       <div class="segmented seg-3" role="group" aria-label="Periodo del riepilogo">
         ${PERIODS.map((p) => `<button type="button" class="seg-btn" data-period="${p}" aria-pressed="${p === days}">${p} notti</button>`).join('')}
       </div>
+      <div class="period-nav" role="group" aria-label="Sposta il periodo nel tempo">
+        <button type="button" class="btn-ghost" id="period-prev" aria-label="${days} notti precedenti">‹ Precedenti</button>
+        ${state.periodOffset ? '<button type="button" class="btn-ghost" id="period-today">Torna a oggi</button>' : ''}
+        <button type="button" class="btn-ghost" id="period-next" aria-label="${days} notti successive" ${state.periodOffset ? '' : 'disabled'}>Successive ›</button>
+      </div>
+      ${state.periodOffset ? '<p class="muted small" id="period-past-note">Stai guardando un periodo passato: riepilogo, grafico degli orari e andamento si riferiscono a queste date. Regolarità, contesto e le tre domande più sotto si riferiscono sempre a oggi.</p>' : ''}
       ${filtersHTML(filt)}
       ${anyData ? `
         <div class="metric-grid">
@@ -1370,7 +1438,7 @@ function periodHTML() {
         ${days <= 28 ? `<div class="card card-pad chart-block">
           <p class="chart-label">Notte per notte</p>
           ${barsHTML(cur)}
-        </div>` : ''}` : `<div class="card card-pad"><p class="muted">Nessuna notte registrata negli ultimi ${days} giorni. Il riepilogo compare dalla prima notte salvata.</p></div>`}
+        </div>` : ''}` : `<div class="card card-pad"><p class="muted">${state.periodOffset ? 'Nessuna notte registrata in questo periodo.' : `Nessuna notte registrata negli ultimi ${days} giorni. Il riepilogo compare dalla prima notte salvata.`}</p></div>`}
     </section>`;
 }
 
@@ -1424,6 +1492,7 @@ function regularityHTML() {
           <p class="muted">Servono almeno ${r.min} notti con addormentamento e risveglio registrati all'epoca negli ultimi ${r.days} giorni (${r.n}/${r.min} finora).</p>`}
         ${sjl}
         ${sjlDst}
+        ${sriHTML(state.entries, todayISO(), state.includeOutliers)}
         ${provNote}
         <details>
           <summary>Come è calcolata e limiti</summary>
@@ -1505,11 +1574,17 @@ function questionCardHTML(q, r) {
   const what = q.id === 'P2'
     ? "Le notti in cui l'ultimo utilizzo dello schermo è dopo l'ora in cui hai provato a dormire, confrontate con le altre. Esito: il tempo dall'ultimo utilizzo (o dal tentativo, se è più tardi) all'addormentamento."
     : `Le notti in cui l'ultimo utilizzo dello schermo cade nell'ora che precede il tuo solito orario di riposo (da un'ora prima fino al solito orario compreso), confrontate con tutte le altre notti, anche quelle in cui l'ultimo utilizzo è dopo il solito orario. Il solito orario è la mediana delle ore in cui hai provato a dormire nelle ${CFG.HABITUAL_WINDOW_NIGHTS} notti precedenti (almeno ${CFG.HABITUAL_MIN_VALUES} valide), esclusa quella in esame. ${q.id === 'P1' ? "Le notti in cui l'ultimo utilizzo è dopo l'ora in cui hai provato a dormire non sono usate: lo schermo verrebbe dopo l'esito." : "L'ultimo utilizzo può essere dopo l'ora in cui hai provato a dormire, ma non dopo l'addormentamento."} Esito: ${q.outcomeText}.`;
-  const s1 = sec(1, 'Che cosa si analizza', `<p class="muted small">${q.question}</p><p class="detail">${what} L'esposizione è solo sì/no in base all'orario dell'ultimo utilizzo: non misura quanti minuti hai usato lo schermo.</p>`);
+  // Le spiegazioni lunghe stanno in sezioni espandibili (23/11/2026): la
+  // scheda resta nell'ordine dei sette elementi ma su iPhone non occupa
+  // più di uno schermo prima del risultato.
+  const s1 = sec(1, 'Che cosa si analizza', `<p class="muted small">${q.question}</p><details class="q-more"><summary>Definizione completa</summary><p class="detail">${what} L'esposizione è solo sì/no in base all'orario dell'ultimo utilizzo: non misura quanti minuti hai usato lo schermo.</p></details>`);
   // 2. Quali dati
   const s2 = sec(2, 'Quali dati', `
+      <p class="detail q-short">Notti usate: ${counts.eligible} su ${counts.considered} nel diario.</p>
+      <details class="q-more"><summary>Quali notti e perché</summary>
       <p class="detail">Notti con ${q.fieldsText}, tutti inseriti al momento o ricopiati da note dell'epoca, con il tipo di giorno indicato; escluse le notti insolite; ${anomalies}. Si controlla la coerenza solo degli orari che questa domanda usa.</p>
       <p class="detail" id="q-${q.id}-nights"><strong>Notti.</strong> Nel diario fino a oggi: ${counts.considered}; usate${ok || degenerate ? ' nel confronto' : ' finora'}: ${counts.eligible}.${exclusions.length ? ` Non usate (ognuna contata una volta, per il primo motivo): ${exclusions.join('; ')}.` : ''}</p>
+      </details>
       ${provenanceNote(r) ? `<p class="muted small">${provenanceNote(r)}</p>` : ''}`);
   // 3. Periodo e numeri
   const nums = r.n
@@ -1607,14 +1682,31 @@ function renderTrend() {
 
     ${actogramSectionHTML()}
 
+    ${trendSectionHTML(filteredEntries().entries, { endDate: periodEnd(), days: state.period, variable: state.trendVariable, includeOutliers: state.includeOutliers })}
+
     ${regularityHTML()}
+
+    ${state.demo ? '' : contextTrendHTML(state.entries, { endDate: t, provenance: state.filters.provenance, includeOutliers: state.includeOutliers }, profileDeps())}
 
     ${questionsHTML()}
   `;
+  const moveTo = (off, focusId) => {
+    state.periodOffset = Math.max(0, off);
+    renderTrend();
+    const again = document.getElementById(focusId) || document.getElementById('period-prev');
+    if (again && !again.disabled) again.focus({ preventScroll: true }); else { const p = document.getElementById('period-prev'); if (p) p.focus({ preventScroll: true }); }
+  };
+  const pp = document.getElementById('period-prev'); if (pp) pp.addEventListener('click', () => moveTo(state.periodOffset + 1, 'period-prev'));
+  const pn = document.getElementById('period-next'); if (pn) pn.addEventListener('click', () => moveTo(state.periodOffset - 1, 'period-next'));
+  const pt = document.getElementById('period-today'); if (pt) pt.addEventListener('click', () => moveTo(0, 'period-prev'));
+  const tv = document.getElementById('trend-var');
+  if (tv) tv.addEventListener('change', () => { state.trendVariable = tv.value; setPref('trend_variable', tv.value); renderTrend(); const again = document.getElementById('trend-var'); if (again) again.focus({ preventScroll: true }); });
+  root.querySelectorAll('[data-goto-profile]').forEach((b) => b.addEventListener('click', () => setTab('profile')));
 
   root.querySelectorAll('[data-open]').forEach((b) => b.addEventListener('click', () => selectNight(b.dataset.open)));
   root.querySelectorAll('[data-period]').forEach((b) => b.addEventListener('click', () => {
     state.period = Number(b.dataset.period);
+    state.periodOffset = 0;
     setPref('trend_period', String(state.period));
     renderTrend();
     const again = root.querySelector(`[data-period="${state.period}"]`);
@@ -1786,7 +1878,8 @@ function renderSettings() {
     </section>
     <section class="card card-pad">
       <h3 class="settings-title">Su questa versione</h3>
-      <p class="muted">App installabile, funziona anche offline, nessun dato lascia il dispositivo. Raccolta dati, calendario, andamento descrittivo, export CSV e backup completi. Schema dei dati: versione ${SCHEMA_VERSION}.</p>
+      <p class="muted">App installabile, funziona anche offline, nessun dato lascia il dispositivo e nessuna connessione verso servizi esterni. Diario con origine dei dati, calendario, andamento descrittivo (riepilogo, orari, andamento di una misura, regolarità con SRI da diario), tre domande su schermo e sonno, Fondamento scientifico, Profilo con storico del lavoro e delle routine, backup delle notti e del contesto, export CSV.</p>
+      <p class="muted small">Dati delle notti: schema ${SCHEMA_VERSION}. Archivio del Profilo e del contesto: separato, versione 1. Rilascio del 23/11/2026.</p>
     </section>
   `;
 
@@ -2389,6 +2482,12 @@ async function checkReminder() {
   } catch (e) { /* ambiente senza SW pronto, si ignora */ }
 }
 
+// ---------- Profilo e contesto (ui-profile.js) ----------
+function profileDeps() {
+  return { root, tabContent, msgHTML, escapeHTML, ICONS, render, todayISO, downloadFile, CFG };
+}
+function renderProfile() { renderProfileScreen(profileDeps()); }
+
 // ---------- Root render ----------
 function setTab(tab) {
   state.tab = tab;
@@ -2428,13 +2527,13 @@ function render() {
   const updateBanner = state.updateReady
     ? `<div class="demo-banner" role="status">${ICONS.info}<span>È pronta una versione aggiornata dell'app. Le modifiche non salvate verranno conservate.</span><button type="button" class="link-btn" id="update-now">Aggiorna</button></div>`
     : '';
-  root.innerHTML = `${renderHeader()}${updateBanner}${demoBanner}<main id="tab-content"></main>${renderNav()}`;
+  root.innerHTML = `${renderHeader()}${prefErrorBannerHTML()}${updateBanner}${demoBanner}<main id="tab-content"></main>${renderNav()}`;
   const exitBtn = root.querySelector('#demo-exit');
   if (exitBtn) exitBtn.addEventListener('click', () => { setDemo(false); render(); });
   const updBtn = root.querySelector('#update-now');
   if (updBtn) updBtn.addEventListener('click', applyUpdate);
   if (state.migration) {
-    root.innerHTML = `${renderHeader()}<main id="tab-content"></main>`;
+    root.innerHTML = `${renderHeader({ profileButton: false })}<main id="tab-content"></main>`;
     document.getElementById('theme-toggle').addEventListener('click', () => setTheme(state.theme === 'light' ? 'dark' : 'light'));
     renderMigration();
     return;
@@ -2447,9 +2546,12 @@ function render() {
   else if (state.tab === 'trend') renderTrend();
   else if (state.tab === 'calendar') renderCalendar();
   else if (state.tab === 'settings') renderSettings();
+  else if (state.tab === 'profile') renderProfile();
 
   document.getElementById('theme-toggle').addEventListener('click', () => setTheme(state.theme === 'light' ? 'dark' : 'light'));
   root.querySelectorAll('[data-tab]').forEach((btn) => btn.addEventListener('click', () => setTab(btn.dataset.tab)));
+  const profBtn = root.querySelector('#profile-btn');
+  if (profBtn) profBtn.addEventListener('click', () => setTab('profile'));
   restoreFocus(key, '.night-title');
 }
 
