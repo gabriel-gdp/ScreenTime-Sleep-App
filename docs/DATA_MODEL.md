@@ -37,7 +37,18 @@ Principi:
 | `ssl_trend_period` | periodo scelto in Andamento: `7` / `28` / `90` |
 | `ssl_daytype_template` | schema settimanale del tipo di giorno: array JSON di 7 valori `constrained`/`free`, indice = giorno della settimana del risveglio (0 = domenica). Predefinito: lun–ven vincolato, sab–dom libero. **Non è una fonte di verità**: serve solo a proporre il valore nelle notti nuove (§2a) |
 | `ssl_late_caffeine_from`, `ssl_alcohol_from` | orari `HH:MM` usati nelle definizioni degli indicatori (predefiniti 15:00 e 18:00) |
+| `ssl_trend_filters` | filtri delle descrizioni in Andamento (Fase 5): JSON `{ dayType: 'all'|'constrained'|'free', includeUnusual: bool, provenance: 'all'|'recorded' }`. Preferenza di visualizzazione: non modifica i dati; i filtri lavorano su copie in memoria |
 | `ssl_reminder_dismissed_date`, `ssl_reminder_notified_date` | chiavi di versioni precedenti, non più lette (innocue) |
+| `ssl_trend_variable` | misura scelta in "Andamento di una misura" (`duration`, `effective`, `onset`, `attempt`, `wake`, `latency`) |
+| `ssl_profile` | Profilo della versione 1 (18/11/2026). Dal 23/11 non viene più scritto: è letto una volta dalla migrazione verso l'archivio contestuale e conservato finché l'utente non lo rimuove ("Rimuovi la vecchia copia" nel Profilo) |
+
+**Esito delle scritture delle preferenze** (23/11/2026). `setPref` in `js/db.js` restituisce sempre l'esito:
+- `{ ok: true }`: valore scritto e riletto uguale;
+- `{ ok: false, reason }`, dove `reason` è `invalid`, `unavailable`, `quota` o `failed`.
+
+Se una scrittura non riesce, l'app mostra un avviso persistente: "Impostazioni non salvate", con il motivo. Non dichiara salvata una scelta che non lo è.
+
+**Secondo archivio: `sleep-screen-context`** (versione 1, indipendente dal database delle notti). Contiene Profilo, periodi con date e preferenze della personalizzazione, ed è facoltativo: se manca, l'app funziona senza personalizzazione. Struttura, regole e migrazione sono in `docs/PROFILE_AND_CONTEXT.md`. Il database delle notti (`sleep-screen-lab`, versione 4) non è stato modificato.
 
 ---
 
@@ -110,7 +121,7 @@ Regole (`withMeta` in `js/record.js`):
 - entro la finestra di 36 ore: `prospective`, `provenanceSetBy = auto`;
 - oltre la finestra l'app chiede una volta "Da dove vengono questi dati?" (ricopiati da note / ricostruiti a memoria / non so) e applica la risposta solo ai campi modificati (`provenanceSetBy = user`);
 - `createdAt` esiste solo per le notti create con lo schema 4; **non viene mai inventato** per le notti storiche, che ricevono solo `updatedAt` quando vengono modificate;
-- la migrazione non scrive nessun `meta`: lo strumento "Origine dei dati" (fase 3) permetterà di classificare i dati storici in modo esplicito e correggibile, senza toccare i valori.
+- la migrazione non scrive nessun `meta`: i dati storici si classificano in modo esplicito e correggibile con lo strumento "Origine dei dati" (§8), che non tocca i valori.
 
 ### 2c. Giorno di calendario dello Screen Time
 
@@ -120,7 +131,7 @@ Regole (`withMeta` in `js/record.js`):
 | **presunto** | campi **assenti** | dato storico: si presume il giorno `date − 1` (regola `historic_convention_wake_minus_1`), **non verificato**. Il valore presunto è solo derivato (`screenTimeReference`), mai scritto |
 | **sconosciuto** | `screenTimeDateStatus = unknown`, senza `screenTimeDate` | il giorno non è ricostruibile |
 
-Ogni nuovo valore di `screenTimeTotal` salva esplicitamente il giorno verificato (`date − 1`, `entry_label`); un valore invariato conserva lo stato che aveva (anche "presunto"). Le date restano distinte: `date` (risveglio), `night_start_date` (sera, `date − 1`), `screenTimeDate` (riferimento dello Screen Time), `meta.*At` (date tecniche).
+Lo stato dei dati storici si cambia solo in modo esplicito, con lo strumento "Origine dei dati" (§8). Ogni nuovo valore di `screenTimeTotal` salva esplicitamente il giorno verificato (`date − 1`, `entry_label`); un valore invariato conserva lo stato che aveva (anche "presunto"). Le date restano distinte: `date` (risveglio), `night_start_date` (sera, `date − 1`), `screenTimeDate` (riferimento dello Screen Time), `meta.*At` (date tecniche).
 
 **Le analisi che richiedono un'associazione temporale certa tra Screen Time e notte devono usare solo notti con giorno verificato, o mostrare separatamente verificate e presunte.** Nelle analisi descrittive attuali (riepilogo di periodo) le notti presunte sono incluse come sempre.
 
@@ -161,7 +172,19 @@ Effetto nelle analisi (escluse di default, per campo): vedi `ANALYTICS_METHODOLO
 | `night_start_date` | `date − 1` (la sera della notte) |
 | Riepilogo di periodo, regolarità | Vedi `ANALYTICS_METHODOLOGY.md` |
 
-Derivati dello schema 4 (`computeNightMetrics`): latenza = addormentamento − tentativo (`latencyMin`), con gli errori di ordine del §2a. Il CSV riporta anche `sleep_onset` (= `bedtime`).
+Derivati dello schema 4 (`computeNightMetrics`, Fase 4; formule in `ANALYTICS_METHODOLOGY.md` §3.1):
+
+| Nome (CSV) | Calcolo |
+|---|---|
+| `estimated_latency_minutes` (`latencyMin`) | addormentamento − tentativo, con gli errori di ordine del §2a |
+| `latency_after_last_use_minutes` (`latencyAfterUseMin`) | addormentamento − max(tentativo, ultimo utilizzo) |
+| `screen_after_attempt` (`screenAfterAttempt`) | `true` se l'ultimo utilizzo è dopo il tentativo; vuoto se manca uno dei due |
+| — (`inBedBeforeAttemptMin`, `screenAfterInBed`) | tentativo − coricamento; ultimo utilizzo dopo il coricamento. L'"uso a letto" mostrato è `screenInBedStatus`: sì/no solo con coricamento e ultimo utilizzo registrati all'epoca, altrimenti "non determinabile" |
+| — (`screenToAttemptMin`, Fase 4.1) | tentativo − ultimo utilizzo; negativo = ultimo utilizzo dopo il tentativo (esclude la notte da P1). Non esportato nel CSV |
+| — (`sleepMidpoint`, Fase 4.1) | punto medio del sonno sulla linea del tempo reale, riletto sull'orologio; nessuna stima se l'addormentamento o il risveglio cade nell'ora inesistente o ripetuta del cambio d'ora (gli orari HH:MM non dicono quale occorrenza) |
+| Orario abituale H, esposizioni di P1–P3 | `js/inference.js`, `ANALYTICS_METHODOLOGY.md` §13. Esposizione di P1 e P3: ultimo utilizzo nell'intervallo circolare [H − 60 min, H], estremi inclusi |
+
+Il CSV riporta anche `sleep_onset` (= `bedtime`).
 
 Non implementati: sleep efficiency (l'ora di coricamento è facoltativa e non basta a stimarla), regolarità settimanale, riepilogo mensile, insight testuali, Personal Recovery Score.
 
@@ -192,7 +215,7 @@ Dopo la migrazione possono esistere notti con ultimo utilizzo successivo all'add
 
 Una riga per notte salvata, ordinate per data, separatore virgola, codifica UTF-8. Colonne, in ordine:
 
-`night_start_date, wake_date, screen_time_total_minutes, last_screen_use, bedtime, wake_time, sleep_quality, sleep_duration_minutes, screen_free_before_bed_minutes, is_outlier_bedtime, outlier_acknowledged_bedtime, is_outlier_screen_time, outlier_acknowledged_screen_time, awakenings, awake_minutes, estimated_sleep_minutes`, poi (schema 4) `sleep_onset, screen_time_date, screen_time_date_status, in_bed_time, sleep_attempt, day_type, day_type_source, late_caffeine, alcohol, stress, unusual_night, last_screen_use_source` e una colonna `prov_<campo>` per ogni campo con provenienza (`prov_screenTimeTotal`, …, `prov_unusualNight`).
+`night_start_date, wake_date, screen_time_total_minutes, last_screen_use, bedtime, wake_time, sleep_quality, sleep_duration_minutes, screen_free_before_bed_minutes, is_outlier_bedtime, outlier_acknowledged_bedtime, is_outlier_screen_time, outlier_acknowledged_screen_time, awakenings, awake_minutes, estimated_sleep_minutes`, poi (schema 4) `sleep_onset, screen_time_date, screen_time_date_status, in_bed_time, sleep_attempt, day_type, day_type_source, late_caffeine, alcohol, stress, unusual_night, last_screen_use_source` e una colonna `prov_<campo>` per ogni campo con provenienza (`prov_screenTimeTotal`, …, `prov_unusualNight`); poi (Fase 4) `estimated_latency_minutes, latency_after_last_use_minutes, screen_after_attempt`.
 
 Le colonne nuove sono sempre in fondo, così chi legge le colonne precedenti per posizione non deve cambiare nulla. `screen_time_date_status` vale `verified`, `presumed` (con `screen_time_date` derivato = `date − 1`) o `unknown`; `prov_<campo>` vale `unknown` quando non c'è una voce in `meta`; indicatori: `true` / `false` / cella vuota (non indicato). `screen_time_total_minutes` si riferisce al giorno `night_start_date`. Celle vuote = dato non inserito o non calcolabile (mai 0): per i risvegli, cella vuota = non indicato, `0` = nessun risveglio. Flag: `true` / `false`. Il CSV non contiene medie o analisi e **non serve per il ripristino**: per quello c'è il backup JSON.
 
@@ -211,7 +234,7 @@ Le colonne nuove sono sempre in fondo, così chi legge le colonne precedenti per
 }
 ```
 
-I record sono copiati esattamente come sono in IndexedDB. Bozze e preferenze non sono incluse.
+I record sono copiati esattamente come sono in IndexedDB. Bozze e preferenze non sono incluse. Profilo e contesto hanno un backup separato (`docs/BACKUP_AND_RESTORE.md` §3).
 
 **Importazione** (`js/backup.js`, `importEntries` in `js/db.js`):
 1. **Validazione completa prima di qualsiasi scrittura**: formato e versione riconosciuti; `schemaVersion` non più recente di quella dell'app; `recordCount` coerente; ogni record con data reale, solo campi noti, tipi e intervalli del §2–3, almeno un dato; risvegli presenti in coppia, `0` ↔ `0`, solo con dati del mattino; per lo schema 4: orari validi, tipo di giorno e origine coerenti, indicatori booleani, tipo di giorno e indicatori solo con dati del mattino, `contextDefs` e `lastScreenUseSource` validi, giorno dello Screen Time coerente con il suo stato (verificato con data ≤ `date`, sconosciuto senza data), `meta` con date ISO, valori di provenienza ammessi e solo campi noti; nessuna data ripetuta. Un solo errore fa rifiutare l'intero file, con il motivo. Limite: 5 MB.
@@ -220,3 +243,38 @@ I record sono copiati esattamente come sono in IndexedDB. Bozze e preferenze non
 4. **Protezione**: di default si aggiungono solo le notti nuove. Sostituire le notti in conflitto è una scelta esplicita che richiede un secondo tocco di conferma. Le notti presenti solo sul dispositivo non vengono mai toccate. Le date sono chiavi uniche: non possono nascere doppioni.
 5. **Scrittura atomica**: tutte le notti in un'unica transazione; se fallisce, il database resta com'era.
 6. **Verifica**: dopo l'importazione il database viene riletto e ogni notte importata viene confrontata con il backup.
+
+---
+
+## 8. Strumento "Origine dei dati" (Impostazioni)
+
+Codice: `js/provenance.js` (funzioni pure) e `js/app.js` (interfaccia). Disponibile solo con i dati reali (non in demo).
+
+**Riepilogo** (sempre visibile): numero di valori per origine (inseriti al momento / ricopiati da note dell'epoca / ricostruiti a memoria / origine non nota), tabella per campo, stato del giorno dello Screen Time (verificati / presunti / sconosciuti).
+
+**Classifica l'origine dei dati**
+- Scelte: intervallo di notti (giorno del risveglio, dal… al…), uno o più gruppi di campi, un'origine.
+
+  | Gruppo | Campi |
+  |---|---|
+  | Sera | `screenTimeTotal`, `lastScreenUse` |
+  | Orari del sonno | `inBedTime`, `sleepAttempt`, `bedtime`, `wakeTime` |
+  | Qualità | `quality` |
+  | Risvegli notturni | `awakenings`, `awakeMinutes` |
+  | Tipo di giorno e indicatori | `dayType`, `lateCaffeine`, `alcohol`, `stress`, `unusualNight` |
+
+- "Solo i valori con origine ancora non nota" (attivo di default): i valori già classificati, compresi quelli dei dati nuovi, non vengono toccati. Togliendo la spunta si può riclassificare tutto: la classificazione è sempre correggibile.
+- Si classificano solo i campi che hanno un valore. Per ciascuno si scrive **solo** `meta.fields[campo] = { provenance, enteredAt (se c'era già), provenanceSetBy: "user", provenanceSetAt }`. Non cambiano i valori, i campi accessori, i flag, `meta.createdAt` / `meta.updatedAt` (nessuna data inventata).
+- "Origine non nota" scelta dall'utente viene registrata come scelta esplicita (`provenanceSetBy = user`); nelle analisi vale come `unknown`.
+
+**Giorno dello Screen Time**
+- *Più notti* (intervallo): "Confermo: è il giorno prima del risveglio" → `screenTimeDate = date − 1`, `verified`, regola `historic_convention_confirmed`; "Non so" → `screenTimeDateStatus = unknown` senza data; "Torna a «presunto»" → i tre campi vengono tolti. Escluse le notti con il giorno indicato all'inserimento (`entry_label`) e quelle corrette a mano (`manual_correction`), che si cambiano una alla volta. Le notti senza Screen Time sono ignorate.
+- *Una notte*: un giorno qualsiasi tra 7 giorni prima del risveglio e il giorno del risveglio (`verified`, `manual_correction`), oppure "Non lo so", oppure "Torna a «presunto»". Vale anche per le notti con il giorno indicato all'inserimento.
+- Il valore `screenTimeTotal` non cambia mai: cambia solo il giorno a cui è attribuito.
+
+**Sicurezza di ogni operazione**
+1. **Anteprima** prima della conferma: quante notti e quanti valori cambiano, da quale stato, quanti restano come sono e perché. L'anteprima non scrive nulla; il piano viene ricalcolato sui dati attuali al momento della conferma.
+2. Promemoria dell'ultimo backup, con "Salva prima un backup".
+3. **Scrittura in un'unica transazione** (`importEntries`): se fallisce, il database resta com'era.
+4. **Verifica** (`verifyOperation`) dopo la rilettura del database: ogni notte scritta è identica all'anteprima; nelle notti scritte è cambiato solo `meta.fields` (provenienza) o solo i tre campi del giorno (Screen Time); tutte le altre notti sono identiche; nessuna notte è comparsa o sparita. In caso di differenza l'app la segnala con le date.
+5. **"Annulla questa operazione"**: riscrive le notti com'erano prima (stessa transazione e verifica). È disponibile finché le notti toccate non vengono modificate in altro modo; dopo resta possibile riclassificarle.

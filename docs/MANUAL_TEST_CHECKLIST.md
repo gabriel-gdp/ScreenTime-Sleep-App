@@ -95,6 +95,96 @@ Requisiti: iOS 15.4 o successivo (16.4 per le notifiche), app pubblicata su HTTP
 | S10 | Selettore orario di "Hai provato a dormire" e "Sei andato/a a letto" | Rotelle iOS, valore centrato, nessuno zoom | ✘ |
 | S11 | Tema chiaro e scuro, testo grande (Impostazioni iOS → Schermo → Dimensioni testo) | Pulsanti Sì/No e tipo di giorno non tagliati né sovrapposti | ✘ |
 
+## E4. Origine dei dati (Fase 3)
+
+Prima di classificare i dati reali: **salva un backup** (anche dal pulsante "Salva prima un backup" nel pannello).
+
+| # | Passi | Risultato atteso | Auto |
+|---|---|---|---|
+| O1 | Impostazioni → Origine dei dati | Riepilogo: i dati di prima dell'aggiornamento "Origine non nota", quelli nuovi "Inseriti al momento"; Screen Time storico "presunto" | ✔ |
+| O2 | "Classifica l'origine dei dati" → tocca Dal / Al | Si apre il calendario di iOS; il giorno scelto resta e l'anteprima si aggiorna | ✘ (selettore data) |
+| O3 | Scegli un intervallo, "Sera" e "Ricopiati da note dell'epoca" | Anteprima con numero di valori e notti; nessun cambiamento finché non tocchi "Classifica N valori" | ✔ |
+| O4 | Conferma, poi controlla alcune notti nel Diario | Esito "verificato"; nel Diario gli stessi valori di prima; nel CSV le colonne `prov_…` aggiornate | ✔ |
+| O5 | "Annulla questa operazione" | Riepilogo tornato come prima | ✔ |
+| O6 | Giorno dello Screen Time → "Una notte" → scegli una notte e un giorno | Stato attuale mostrato; dopo "Aggiorna": "corretto a mano" | ✔ |
+| O7 | Tema chiaro e scuro, testo grande | Caselle, pulsanti e date non tagliati né sovrapposti | ✘ |
+
+## E5. Schermo e sonno, regolarità, notte singola (Fase 4)
+
+| # | Passi | Risultato atteso | Auto |
+|---|---|---|---|
+| Q1 | Con i tuoi dati: Andamento → Schermo e sonno | Tre schede "Dati non ancora sufficienti" con il minimo, il conteggio e il rimando a Origine dei dati; nessun numero | ✔ |
+| Q2 | Regolarità con i dati storici non classificati | "Servono almeno 14 notti… registrati all'epoca" e la nota sulle notti non considerate | ✔ |
+| Q3 | Impostazioni → Origine dei dati: classifica le notti storiche che hai ricopiato da note, poi torna ad Andamento | La regolarità compare (se nelle ultime 4 settimane ci sono almeno 14 notti) | ✔ |
+| Q4 | Diario: tentativo 23:20, ultimo utilizzo 23:35, addormentamento 23:50 | "Tempo per addormentarti 30 min", "Dopo l'ultimo utilizzo 15 min", "Schermo dopo aver provato a dormire: sì" | ✔ |
+| Q5 | Impostazioni → Modalità demo → Andamento | Tre risultati con intervallo, notti, periodo, "associazione osservata" o "non emerge una differenza chiara"; regolarità con tentativo, tipi di giorno e giorni liberi/vincolati | ✔ |
+| Q6 | In demo apri "Come è calcolato" e "Altre verifiche" in ogni scheda | Testi leggibili, nessuna sovrapposizione; righe di sensibilità allineate | ✘ (leggibilità su iPhone) |
+| Q7 | Cambia periodo (7/28/90) in demo | La schermata si aggiorna senza attese percepibili | ✘ (velocità su iPhone) |
+| Q8 | Testo grande e tema scuro in Andamento | Schede, badge e tabelle non tagliati | ✘ |
+
+## E6. Revisione della Fase 4.1 (Safari su iPhone)
+
+Da verificare con la PWA aperta dalla schermata Home, in tema chiaro e scuro. Non è stato possibile eseguire Safari/WebKit nell'ambiente di sviluppo: questi controlli sono necessari.
+
+| # | Passi | Risultato atteso | Auto (Chromium) |
+|---|---|---|---|
+| R1 | Andamento → Schermo e sonno, scheda P1 → "Come è calcolato" | Finestra "da un'ora prima fino al solito orario compreso"; nessun "(o dopo)"; "Le notti in cui l'ultimo utilizzo è dopo l'ora in cui hai provato a dormire non sono usate" | ✔ |
+| R2 | Schede P1 e P3 | Riga "Il tuo solito orario di riposo…" con le notti valide su 28, oppure "non ancora calcolabile… ne servono 14" | ✔ |
+| R3 | "Come è calcolato" di ogni scheda | Riga "Nel diario fino a oggi: X; usate…: Y. Non usate (ognuna contata una volta…)" con motivi leggibili, compreso "con l'ultimo utilizzo dopo l'ora in cui hai provato a dormire" (P1) e "dopo l'addormentamento" (P3) | ✔ |
+| R4 | Con notti segnate come anomale: tocca "Includi le anomalie" nella sezione Schermo e sonno (o nel riepilogo) | La riga sopra le schede passa da "escluse" a "incluse"; le notti usate aumentano; il solito orario non cambia; il pulsante resta raggiungibile con VoiceOver | ✔ (VoiceOver ✘) |
+| R5 | Demo, tre schede | Nessun "NaN", "Infinity", "undefined"; intervalli con "da … a … min"; etichette dei gruppi "con l'ultimo utilizzo in quell'ora" / "prima di quell'ora o dopo il tuo solito orario" | ✔ |
+| R6 | Regolarità con dati che comprendono la notte del 25/10 con un orario tra 02:00 e 02:59 | Riga "Non usate per la differenza tra giorni liberi e vincolati…: ora ripetuta…"; la notte resta nelle altre analisi | ✔ |
+| R7 | Testo grande (Impostazioni iOS) | Badge "Risultato non stimabile" / "Dati non ancora sufficienti" e titoli delle schede non sovrapposti | ✘ |
+| R8 | Aggiornamento della PWA già installata | Dopo la riapertura compare la nuova versione (cache v13); i dati sono invariati | ✘ |
+
+## E7. Andamento e Fondamento scientifico (Fase 5, Safari su iPhone)
+
+| # | Passi | Risultato atteso | Auto (Chromium) |
+|---|---|---|---|
+| V1 | Andamento → Filtri → Liberi, poi "Registrate all'epoca", poi "Includi le notti insolite" | Il riassunto cambia; la riga "Esclusi dai filtri…" dice che cosa è escluso; regolarità e Schermo e sonno non cambiano | ✔ |
+| V2 | Chiudi e riapri l'app | I filtri scelti restano; il pannello è aperto se un filtro è attivo | ✔ |
+| V3 | Grafico degli orari con 7, 28 e 90 notti | Barre leggibili, etichette dei giorni non sovrapposte, segno del solito orario visibile; in tema scuro i tratti chiari si distinguono dallo sfondo | ✔ (resa su Safari ✘) |
+| V4 | Con i dati storici non ancora classificati | Barre e punti vuoti; "Vedi come tabella" con ° accanto ai valori | ✔ |
+| V5 | VoiceOver sul grafico | Legge titolo e descrizione ("Orari di N notti…"); la tabella è navigabile | ✘ |
+| V6 | Una scheda di Schermo e sonno | Sette elementi numerati; "Nei tuoi dati" non cita studi; "7 · Fondamento scientifico" separa evidenza generale, contesto (badge per gli studi su bambini e ragazzi), metodo e misura | ✔ |
+| V7 | "Tutte le fonti…" | Apre Impostazioni → Fondamento scientifico, con i gruppi per stato (16, 14, 5, 2, 1) | ✔ |
+| V8 | In modalità aereo, con l'app installata dalla Home | Il Fondamento scientifico si apre e si legge; i collegamenti "fonte originale" si aprono solo con la rete | ✘ |
+| V9 | Tocca "fonte originale" | Si apre Safari su una nuova pagina; tornando all'app i dati e la schermata sono intatti | ✘ |
+| V10 | Aggiornamento della PWA già installata | Nuova versione (cache v14) dopo la riapertura; dati invariati | ✘ |
+
+## E8. Profilo e contesto (rilascio finale, Safari su iPhone)
+
+Prima: salva il backup delle notti.
+
+| # | Passi | Risultato atteso | Auto (Chromium) |
+|---|---|---|---|
+| K1 | Apri la nuova versione **senza** cancellare nulla, se avevi già compilato il Profilo il 18/11 | Il saluto in alto mostra il tuo nome; nel Profilo i dati ci sono; professione e turni compaiono come "valori senza date"; in "Cancellazione" la vecchia copia è dichiarata | ✔ |
+| K2 | Profilo → modifica un campo → "Salva profilo" | "Profilo salvato e verificato"; il saluto si aggiorna | ✔ |
+| K3 | Data di nascita e "Vorrei provare a dormire entro le" | Si aprono il selettore di data e quello dell'ora di iOS, leggibili; il valore resta dopo il salvataggio | ✘ |
+| K4 | Età in anni | Compare la tastiera numerica; "200" è segnalato in rosso e non viene salvato | ✔ (tastiera ✘) |
+| K5 | Lavoro e routine → aggiungi un periodo di lavoro iniziato mesi fa | "Registrato all'epoca" non è selezionabile; scegliendo "ricostruito a memoria" il periodo si salva; l'elenco mostra "in corso" e la provenienza | ✔ |
+| K6 | Aggiungi un secondo periodo di lavoro che si sovrappone | Messaggio "Si sovrappone a…", nulla salvato | ✔ |
+| K7 | "Termina" il primo periodo, poi aggiungi quello nuovo dal giorno dopo | Entrambi salvati; "Annulla" dopo ogni operazione la annulla | ✔ |
+| K8 | Diario → la notte di oggi | "Contesto della notte" con il periodo e, se c'è una sveglia, il confronto con l'orario di risveglio | ✔ |
+| K9 | Andamento → "Nel tuo contesto" | Confronti con il numero di notti; con un obiettivo nel Profilo, spunti con "Perché questo spunto" (oppure quante notti servono) | ✔ |
+| K10 | Profilo → "Salva backup del contesto" | Si scarica un file `diario-del-sonno-contesto-…json` in File | ✘ |
+| K11 | "Ripristina il contesto" con lo stesso file | Riepilogo con "identici"; "Aggiungi i nuovi" non cambia nulla | ✔ (selettore file ✘) |
+| K12 | Chiudi l'app dal multitasking e riaprila, anche dopo un riavvio del telefono | Profilo, periodi e preferenze della personalizzazione ci sono ancora | ✘ |
+| K13 | Navigazione privata di Safari (facoltativo) | Se il browser blocca l'archivio, il Profilo dice "non disponibile" e Diario e Andamento funzionano | ✔ (simulato) |
+| K14 | VoiceOver sul Profilo | Ogni campo legge la sua etichetta; errori letti quando si torna sul campo; i giorni della settimana sono caselle con nome | ✘ |
+
+## E9. Nuove analisi, privacy, aggiornamento (rilascio finale)
+
+| # | Passi | Risultato atteso | Auto (Chromium) |
+|---|---|---|---|
+| N1 | Andamento → Regolarità | Sotto la deviazione standard compare "SRI da diario" (oppure quante coppie di notti servono) | ✔ |
+| N2 | Andamento → "Andamento di una misura" → cambia misura | Il grafico si aggiorna; punti pieni o vuoti; linea della media mobile; "Vedi come tabella" | ✔ (resa su Safari ✘) |
+| N3 | "‹ Precedenti" nel riepilogo | Date del periodo precedente; "Torna a oggi" riporta al periodo attuale | ✔ |
+| N4 | Schede di "Schermo e sonno" | Più corte: "Definizione completa" e "Quali notti e perché" si aprono a richiesta | ✔ |
+| N5 | In modalità aereo, app dalla Home | I caratteri sono gli stessi di quando sei online (nessun carattere di sistema al loro posto) | ✘ |
+| N6 | Impostazioni di Safari → Avanzate → Dati dei siti web (facoltativo) | Nessun dato di fonts.googleapis.com o altri domini esterni dopo l'uso dell'app | ✘ |
+| N7 | Aggiornamento della PWA già installata | Nuova versione (cache v18) dopo la riapertura; notti, profilo e periodi invariati | ✘ |
+
 ## F. Notifiche (iOS 16.4+, app dalla Home)
 
 | # | Passi | Risultato atteso | Auto |
