@@ -79,7 +79,25 @@ In evoluzione secondo la roadmap approvata il 17/11/2026 (`docs/research/IMPLEME
 - **Origine dei dati** (Fase 3, Impostazioni): riepilogo dell'origine di tutti i valori; classificazione dei dati storici per intervallo di date e gruppi di campi (ricopiati da note, ricostruiti a memoria, inseriti al momento, origine non nota); conferma, "non so" o correzione del giorno dello Screen Time, per più notti o per una. Ogni operazione mostra un'anteprima, scrive in un'unica transazione, rilegge il database verificando che nessun valore del diario sia cambiato e si può annullare. Dettagli: `docs/DATA_MODEL.md` §8.
 - **Schermo e sonno** (Fase 4, Andamento): tre domande, sempre le stesse. P1: ultimo utilizzo dello schermo nell'ora che precede il tuo solito orario di riposo H (finestra [H − 60 min, H], estremi inclusi) e ora in cui provi a dormire; le notti con l'ultimo utilizzo dopo il tentativo non sono usate. P2: schermo dopo aver provato a dormire e tempo per addormentarti dopo averlo lasciato. P3: stessa finestra di P1 e sonno effettivo stimato (quanto hai dormito, non quanto ci hai messo ad addormentarti); ammesso l'utilizzo dopo il tentativo, non dopo l'addormentamento. L'esposizione è sì/no in base all'orario dell'ultimo utilizzo, non una misura dei minuti. Ogni domanda controlla solo i dati che usa; "Includi le anomalie" vale anche qui (non per H). Un numero compare solo con almeno 30 notti di dati registrati all'epoca, tipo di giorno indicato, abbastanza notti in ciascun gruppo, varianza stimabile e abbastanza notti "indipendenti"; prima la scheda dice che cosa manca, o che il risultato non è stimabile. Ogni risultato è un'associazione, con intervallo, interpretazione possibile, spiegazioni alternative e analisi di sensibilità. Nel Diario: tempo per addormentarti, tempo dopo l'ultimo utilizzo, schermo dopo il tentativo e a letto. La regolarità usa solo dati registrati all'epoca e mostra anche il tentativo, i tipi di giorno e la differenza tra giorni liberi e vincolati. Dettagli: `docs/ANALYTICS_METHODOLOGY.md` §3.1, §4.6, §13. Documenti di ricerca da cui vengono le scelte (copiati senza modifiche, non aggiornati): `docs/research/`. Revisione della Fase 4.1: `docs/PHASE_4_1_REPORT.md`.
 - **Andamento e Fondamento scientifico** (Fase 5): filtri della panoramica (tipo di giorno, notti insolite, origine dei dati), che non toccano regolarità e domande; grafico degli **orari** notte per notte (a letto, tentativo, sonno, ultimo utilizzo, solito orario; pieno se registrato all'epoca, vuoto se no; leggibile anche come tabella); schede a **sette elementi** (che cosa, quali dati, numeri, come è calcolato, nei tuoi dati, limiti, fondamento); **Fondamento scientifico** consultabile offline (Impostazioni e schede) con lo stato di verifica di ogni fonte: numeri solo da fonti verificate, mai nella stessa frase dei tuoi risultati. Dettagli: `docs/ANALYTICS_METHODOLOGY.md` §14.
-- **Non implementati**: riepilogo mensile, insight testuali, Personal Recovery Score; andamento di una singola variabile con le notti insolite evidenziate (consigliato, non pianificato).
+- **Profilo e contesto** (icona nell'intestazione, 23/11/2026): dati personali facoltativi, fabbisogno di sonno percepito, obiettivi; periodi con date di lavoro o studio (orari, giorni, sveglia) e routine particolari, ciascuno con la propria provenienza. Sono salvati in un archivio separato (`sleep-screen-context`), con un backup proprio. Servono alla personalizzazione:
+  - contesto della notte nel Diario;
+  - confronti tra periodi in Andamento;
+  - spunti legati agli obiettivi.
+
+  Non cambiano le notti, le statistiche né P1–P3. Dettagli: `docs/PROFILE_AND_CONTEXT.md`.
+- **Analisi descrittive aggiunte** (23/11/2026):
+  - SRI da diario nella Regolarità;
+  - "Andamento di una misura", con media mobile a 7 notti, pendenza di Theil–Sen, notti molto diverse dal solito (MAD, solo visive) e confronto con la variabilità abituale;
+  - navigazione nei periodi passati del riepilogo.
+
+  Dettagli: `docs/ANALYTICS_METHODOLOGY.md` §16.
+- **Non implementati, per scelta**:
+  - punteggi compositi (Personal Recovery Score o simili);
+  - insight testuali automatici;
+  - consigli medici;
+  - sincronizzazione o backup combinato (opzionale futuro).
+
+  Il riepilogo mensile si ottiene con il periodo di 28 notti e la navigazione nel tempo.
 
 ## Test
 
@@ -91,3 +109,5 @@ npx playwright install chromium
 npm test               # test della logica + test nel browser
 npm run test:unit      # solo logica, basta Node 18+ (nessuna installazione)
 ```
+
+Stato al 23/11/2026: 31 suite, 1.151 controlli superati (Chromium). Strategia e livelli dei test: `docs/TEST_STRATEGY.md`. Report del rilascio: `docs/FINAL_RELEASE_REPORT.md`.

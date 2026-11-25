@@ -4,6 +4,10 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Diario del sonno</title>
+  <!-- Sicurezza: solo risorse dell'app stessa; nessuna connessione verso servizi esterni.
+       Lo script di avvio qui sotto è autorizzato dalla sua impronta: se lo modifichi, aggiorna l'hash
+       (tests/unit/security.test.mjs lo controlla). -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-zjE/dSf1DGnlqAx5IPp34rTvJbQ00g0I3yLzMMql0Bs='; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; manifest-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'" />
   <meta name="description" content="Personal analytics tool per sonno e screen time" />
   <meta name="theme-color" content="#F6F3EE" />
   <link rel="manifest" href="manifest.json" />
