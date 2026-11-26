@@ -8,6 +8,10 @@ Esiti delle verifiche:
 
 Punto di partenza: `docs/FINAL_PROJECT_AUDIT.md`. Decisioni: `docs/ARCHITECTURE.md` §5.
 
+> **Aggiornamento del 26/11/2026: logo A1 e avatar.** Nuove icone e logo in linea nella schermata iniziale, con il nastro che si posa per ultimo (rispetta "riduci movimento"). Nove avatar con varianti nel Profilo, salvati e verificati nell'archivio del contesto. Cache `sleep-screen-lab-v20`. Suite: **35 suite, 1.268 controlli PASS, 0 FAIL** (nuove `unit/avatars`, `unit/icons`, `browser/avatar`). Icona sulla Home e fluidità su iPhone reale: **NOT TESTED** (checklist E11).
+>
+> **Aggiornamento del 26/11/2026: schermata iniziale.** Logo, nome, frase e firma, legati all'avvio reale. Tema applicato prima del primo disegno. Cache `sleep-screen-lab-v19`. Suite: **32 suite, 1.176 controlli PASS**, compresa la nuova `browser/splash` con 25 controlli. Dettagli in `CHANGELOG.md` e `docs/ARCHITECTURE.md` §3.1; verifica su iPhone in `docs/MANUAL_TEST_CHECKLIST.md` E10. Il resto di questo report descrive il rilascio del 23/11.
+
 ## 1. Stato finale del progetto
 **Pronto per l'uso quotidiano, con una riserva: la verifica su iPhone.**
 - Le funzioni previste sono implementate e verificate in Chromium con la larghezza di un iPhone 16 e su desktop.

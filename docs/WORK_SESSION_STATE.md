@@ -20,9 +20,11 @@ Serve a riprendere il lavoro senza ripetere operazioni già fatte. Aggiornato a 
 | R8 Analisi descrittive approvate | Completata (23/11) | `trends.js`, `ui-trends.js`; test `unit/trends`, `browser/ux` |
 | R9 UX e accessibilità | Completata (23/11) | schede compatte, bersagli ≥ 44 px, navigazione nel tempo, tabelle mobili; audit automatico mobile/desktop in `browser/ux` |
 | R10 Documentazione e rilascio | Completata (23/11) | suite finale: 31 suite, 1.151 controlli PASS; `FINAL_RELEASE_REPORT.md`, `CHANGELOG.md`; zip |
+| S1 Schermata iniziale | Completata (26/11) | `js/boot.js`, `icons/logo.svg`, `#splash`; test `browser/splash`; suite completa 32/32, 1.176 controlli PASS |
+| S2 Logo A1 e avatar | Completata (26/11) | `icons/*` rigenerate, logo in linea nella schermata iniziale, `js/avatars.js`, campo `avatar` del Profilo; cache v20; suite completa 35/35, 1.268 controlli PASS |
 
 ## Prossima attività
-Nessuna attività di sviluppo pendente. In attesa della checklist manuale E6–E9 su iPhone (a cura dell'utente). Possibili evoluzioni future: separazione di `app.js` con test di equivalenza, backup combinato, verifica delle fonti V2.
+Nessuna attività di sviluppo pendente. In attesa della checklist manuale E6–E10 su iPhone (a cura dell'utente). Possibili evoluzioni future: separazione di `app.js` con test di equivalenza, backup combinato, verifica delle fonti V2.
 
 ## Problemi incontrati e risolti
 - CSP e aiutante di test con `new Function` (backup): opzione `bypassCSP` solo in quel test.

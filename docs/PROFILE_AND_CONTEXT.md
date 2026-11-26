@@ -45,6 +45,7 @@ Tutti facoltativi. Eliminazione: "Cancella profilo" nel Profilo (due tocchi) li 
 | Obiettivo: schermo spento almeno N min prima | Spunti | 15, 30, 45, 60, 90, 120 | dichiarato | spunti | personale |
 | Obiettivo con parole tue | Promemoria | testo, max 200 | dichiarato | **non interpretato** dall'app | personale |
 | Note | Promemoria | testo, max 1000 | dichiarato | nessun uso | personale |
+| Immagine del profilo (`avatar`, dal 26/11/2026) | Riconoscere la propria scheda, personalizzare l'intestazione | `null` oppure `{id, tone, hair, glasses}`: id fra i nove volti, tono fra quelli di quel volto, capelli solo per le persone, occhiali booleano; un valore sconosciuto è rifiutato, mai corretto (`js/avatars.js`, `validateAvatar`) | scelta estetica; **non è una foto**, non descrive la persona | intestazione e Profilo; **nessun uso** nelle analisi né nei testi | bassa; carnagione e capelli sono solo colori del disegno. Si toglie con "Nessuna immagine" (torna l'iniziale del nome) o con "Cancella profilo" |
 | Valori del profilo precedente senza date (professione, turni) | Non perdere dati della versione 1 | conservati come erano | dichiarato **senza date** | mostrati; "Crea un periodo con questi valori" precompila un periodo, con date e provenienza scelte dall'utente; "Togli questi valori" li elimina | personale |
 
 Non raccolti, perché non servono a nessuna funzione: indirizzo, città, contatti, peso, altezza, diagnosi, farmaci.

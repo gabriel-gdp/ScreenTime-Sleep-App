@@ -183,7 +183,33 @@ Prima: salva il backup delle notti.
 | N4 | Schede di "Schermo e sonno" | Più corte: "Definizione completa" e "Quali notti e perché" si aprono a richiesta | ✔ |
 | N5 | In modalità aereo, app dalla Home | I caratteri sono gli stessi di quando sei online (nessun carattere di sistema al loro posto) | ✘ |
 | N6 | Impostazioni di Safari → Avanzate → Dati dei siti web (facoltativo) | Nessun dato di fonts.googleapis.com o altri domini esterni dopo l'uso dell'app | ✘ |
-| N7 | Aggiornamento della PWA già installata | Nuova versione (cache v18) dopo la riapertura; notti, profilo e periodi invariati | ✘ |
+| N7 | Aggiornamento della PWA già installata | Nuova versione (cache v19 dal 26/11) dopo la riapertura; notti, profilo e periodi invariati | ✘ |
+
+## E10. Schermata iniziale (26/11/2026)
+
+| # | Passi | Risultato atteso | Auto (Chromium) |
+|---|---|---|---|
+| S1 | Chiudi l'app dal multitasking e riaprila dalla Home | Logo, nome, frase e "Un progetto di Gabriel" in basso; dopo meno di un secondo il Diario. Nessuno scatto né sfarfallio | ✔ (tempi) |
+| S2 | Cambia scheda più volte, apri il Profilo | La schermata iniziale non ricompare | ✔ |
+| S3 | Torna alla Home e rientra nell'app senza chiuderla | Nessuna schermata iniziale: l'app è com'era | ✘ |
+| S4 | Con il tema scuro, chiudi e riapri | Schermata iniziale scura fin dal primo istante (nessun lampo chiaro) | ✔ |
+| S5 | Impostazioni di iOS → Accessibilità → Movimento → Riduci movimento: attivo; riapri l'app | Nessun movimento, solo una dissolvenza breve | ✔ |
+| S6 | Modalità aereo, riapri l'app | Schermata iniziale con il logo, poi il Diario | ✔ |
+| S7 | VoiceOver attivo, riapri l'app | VoiceOver non legge la schermata iniziale; la prima voce letta è dell'app | ✔ (attributi) / ✘ (lettura reale) |
+| S8 | Dopo l'aggiornamento alla cache v19 ("Aggiorna" o riapertura) | Nessuna schermata iniziale al ricaricamento automatico; dati invariati | ✔ |
+
+## E11. Logo A1 e avatar del Profilo (26/11/2026)
+
+| # | Passi | Risultato atteso | Auto (Chromium) |
+|---|---|---|---|
+| L1 | Dopo l'aggiornamento alla cache v20, togli l'app dalla Home e aggiungila di nuovo da Safari ("Condividi" → "Aggiungi a Home") | Icona con la luna di pagine dorata e il nastro su fondo notte (iOS conserva la vecchia icona finché non si aggiunge di nuovo) | ✔ (file e dimensioni) / ✘ (Home reale) |
+| L2 | Chiudi e riapri l'app, tema chiaro e poi scuro | Logo oro scuro su fondo chiaro, oro chiaro su fondo scuro; il nastro scende per ultimo e si posa senza scatti | ✔ (colori, tempi) / ✘ (fluidità reale) |
+| L3 | Con "Riduci movimento" attivo, riapri l'app | Il nastro è già al suo posto; solo dissolvenza | ✔ |
+| A1 | Profilo → "Cambia immagine" → scegli un volto, poi carnagione, capelli e occhiali | Ogni tocco aggiorna subito l'immagine nel Profilo e nell'intestazione; messaggio "Immagine salvata" | ✔ |
+| A2 | Scegli un personaggio (gufo, gatto…) e un suo colore | Nessuna scelta dei capelli; colori propri del personaggio | ✔ |
+| A3 | Chiudi e riapri l'app | L'immagine scelta è ancora lì | ✔ |
+| A4 | "Nessuna immagine" | Torna l'iniziale del nome | ✔ |
+| A5 | VoiceOver sul Profilo | Legge "Immagine del profilo: …" con volto e varianti; ogni casella ha un nome | ✔ (attributi) / ✘ (lettura reale) |
 
 ## F. Notifiche (iOS 16.4+, app dalla Home)
 

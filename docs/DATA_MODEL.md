@@ -39,6 +39,7 @@ Principi:
 | `ssl_late_caffeine_from`, `ssl_alcohol_from` | orari `HH:MM` usati nelle definizioni degli indicatori (predefiniti 15:00 e 18:00) |
 | `ssl_trend_filters` | filtri delle descrizioni in Andamento (Fase 5): JSON `{ dayType: 'all'|'constrained'|'free', includeUnusual: bool, provenance: 'all'|'recorded' }`. Preferenza di visualizzazione: non modifica i dati; i filtri lavorano su copie in memoria |
 | `ssl_reminder_dismissed_date`, `ssl_reminder_notified_date` | chiavi di versioni precedenti, non più lette (innocue) |
+| `ssl_splash_seen` (in **sessionStorage**, non localStorage) | segno "schermata iniziale già mostrata in questa sessione"; si azzera chiudendo l'app; nessun dato personale |
 | `ssl_trend_variable` | misura scelta in "Andamento di una misura" (`duration`, `effective`, `onset`, `attempt`, `wake`, `latency`) |
 | `ssl_profile` | Profilo della versione 1 (18/11/2026). Dal 23/11 non viene più scritto: è letto una volta dalla migrazione verso l'archivio contestuale e conservato finché l'utente non lo rimuove ("Rimuovi la vecchia copia" nel Profilo) |
 

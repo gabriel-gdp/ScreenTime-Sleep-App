@@ -5,7 +5,8 @@ PWA local-first in JavaScript senza dipendenze in esecuzione e senza passaggi di
 ## 1. Moduli
 
 ```
-index.html ─ CSP, script di avvio (messaggio se l'app non parte)
+index.html ─ CSP, schermata iniziale (#splash), script di avvio (messaggio se l'app non parte)
+├─ js/boot.js           nel <head>: tema prima del primo disegno, schermata iniziale (script classico, nessuna dipendenza)
 └─ js/app.js            stato, rendering di Diario, Andamento, Calendario, Impostazioni; preferenze (setPref con esito)
    ├─ js/db.js           IndexedDB `sleep-screen-lab` v4 (notti) + localStorage `ssl_*`        [consolidato]
    ├─ js/record.js       campi del record, provenienza per campo, bozze                          [consolidato]
@@ -17,7 +18,8 @@ index.html ─ CSP, script di avvio (messaggio se l'app non parte)
    ├─ js/demo.js · js/config.js
    ├─ js/trends.js       SRI da diario, L3–L4, variabilità abituale (puro)
    ├─ js/ui-trends.js    interfaccia di trends.js
-   └─ js/ui-profile.js   schermata Profilo, blocchi di personalizzazione
+   └─ js/ui-profile.js   schermata Profilo, blocchi di personalizzazione, scelta dell'immagine
+        ├─ js/avatars.js      nove volti SVG con varianti, validazione dell'immagine (puro, nessuna rete)
         ├─ js/profile.js      Profilo v2: validazione, età, lettura rigorosa del profilo v1 (puro)
         ├─ js/context.js      periodi [validFrom, validTo), resolver, formato del backup del contesto (puro)
         ├─ js/context-db.js   IndexedDB `sleep-screen-context` v1, migrazione, scritture verificate
@@ -35,10 +37,28 @@ Direzione delle dipendenze: i moduli consolidati non importano mai quelli nuovi,
 - **Backup**: due file separati, descritti in `docs/BACKUP_AND_RESTORE.md`.
 
 ## 3. Flusso di avvio
+0. `js/boot.js` (nel `<head>`, prima del primo disegno) applica il tema salvato o quello del sistema. Al primo avvio della sessione mostra la schermata iniziale: logo A1 (SVG in linea in `index.html`, colori dai token `--logo-moon` e `--logo-ribbon`; il nastro scende per ultimo), nome, frase e firma.
 1. `inspectDatabase`: se il database delle notti va aggiornato, si apre la schermata di migrazione con backup verificato.
 2. Lettura delle notti → primo rendering.
 3. `initContext` in parallelo, senza bloccare: apre l'archivio contestuale, esegue la migrazione una tantum del profilo, carica e ridisegna. Se l'archivio non è disponibile, lo stato diventa `unavailable` e la personalizzazione si spegne con un messaggio.
 4. Registrazione del service worker, richiesta di archiviazione persistente.
+
+### 3.1 Schermata iniziale
+**Quando compare e quando no:**
+- **Compare** solo all'apertura dell'app in una nuova sessione: dal browser o dalla Home. `sessionStorage` contiene `ssl_splash_seen`.
+- **Non compare** cambiando scheda, perché la navigazione non ricarica la pagina.
+- **Non compare** ai ricaricamenti nella stessa sessione, come quello dopo un aggiornamento del service worker.
+- **Non compare** tornando all'app ancora aperta in memoria.
+
+**Quando si chiude:**
+- Al primo disegno completato, segnalato da `app.js` con l'evento `ssl:ready` (diario, migrazione o errore di lettura). La chiusura avviene al più presto 400 ms dopo l'inizio, il tempo della comparsa di logo e nome, ed è seguita da una dissolvenza di 260 ms. Se l'app impiega di più, la schermata copre solo l'inizializzazione reale; nessuna attesa è aggiunta oltre.
+- Con "riduci movimento": nessuno spostamento, nessuna attesa minima, dissolvenza di 120 ms al massimo.
+- Se l'avvio fallisce: chiusura automatica a 5 s, prima del messaggio d'errore dell'avvio a 6 s. Una regola CSS la nasconde comunque a 6 s.
+
+**Isolamento e accessibilità:**
+- Non apre né modifica archivi: legge solo il tema da `localStorage`.
+- È decorativa: `aria-hidden="true"`, nessun elemento attivabile, quindi VoiceOver non la legge.
+- Test: `tests/browser/splash.test.mjs`.
 
 ## 4. Prestazioni
 Misure in Chromium, 150 notti di esempio:
@@ -64,4 +84,6 @@ I calcoli costosi di P1–P3 usano una cache per singolo calcolo. Nessuna risors
 | ADR-9 | Content Security Policy | nessuna; con `unsafe-inline` per gli script; con hash | hash dello script di avvio, `connect-src 'self'`, niente eval | Seconda barriera contro errori di escape; garanzia tecnica del local-first | Modificare lo script di avvio richiede di aggiornare l'hash (lo controlla un test) |
 | ADR-10 | Crescita di `app.js` | rifattorizzazione completa; nuovi moduli per le nuove parti | nuove parti in moduli propri (`ui-profile.js`, `ui-trends.js`); `app.js` invariato nella logica esistente | Nessun refactoring rischioso di parti testate | `app.js` resta grande (≈2.600 righe): separarlo è un'attività futura con test di equivalenza |
 | ADR-11 | Analisi L3/L4, SRI, variabilità | non implementarle; implementarle | implementate come descrittive, con le soglie già approvate | Approvate in STATISTICAL_VALIDATION; aggiungono capacità interpretativa senza toccare P1–P3 | Più testo in Andamento, compensato da sezioni espandibili |
+| ADR-13 | Schermata iniziale | nessuna; durata fissa; legata all'avvio reale | legata all'evento `ssl:ready`, minimo 400 ms (comparsa) + 260 ms (uscita), una volta per sessione; tema applicato prima del primo disegno | Identità del prodotto senza rallentare chi apre l'app spesso; nessun lampo del tema sbagliato | ~0,4 s in più nel caso più veloce; nessuno nei ricaricamenti e nella navigazione |
+| ADR-14 | Logo e immagine del Profilo | `<img>` del logo; foto caricate; avatar disegnati in SVG | logo A1 in linea con colori dal tema; avatar SVG generati da funzioni pure, salvati come `{id, tone, hair, glasses}` | Nessuna foto da custodire (privacy, spazio); il logo segue il tema senza due file; il nastro può animarsi da solo | Il logo della schermata iniziale è ripetuto in `index.html` e `icons/logo.svg` (test `unit/icons`) |
 | ADR-12 | Spunti comportamentali | consigli generali; spunti legati agli obiettivi | solo dagli obiettivi dichiarati, con motivo, dati e soglie | Evita consigli prescrittivi e causalità (FINAL_ANALYTICS_SPEC: niente consigli prescrittivi) | Senza obiettivi, nessuno spunto |
