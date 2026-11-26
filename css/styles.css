@@ -13,6 +13,7 @@
   --accent-soft: #E1EAE8; --warm: #C98A3E; --warm-soft: #F6E8D3; --warn-ink: #8A5A1C;
   --line: #E4E0D8; --control-line: #8D877E; --danger: #A63D38; --danger-soft: #F7E3E1; --info-soft: #E8EEF3; --info-ink: #3B5670;
   --nav-bg: rgba(255, 255, 255, 0.92);
+  --logo-moon: #C08A22; --logo-ribbon: #D9893A;
 }
 :root[data-theme="dark"] {
   --bg: #14161C; --surface: #1B1E27; --surface-2: #232733;
@@ -20,6 +21,7 @@
   --accent-soft: #23302E; --warm: #E0A85C; --warm-soft: #3A2E1C; --warn-ink: #E9BC7E;
   --line: #2C303B; --control-line: #6E7383; --danger: #E58A84; --danger-soft: #3A2223; --info-soft: #1F2A36; --info-ink: #A9C2D9;
   --nav-bg: rgba(27, 30, 39, 0.92);
+  --logo-moon: #F2D58A; --logo-ribbon: #E3A64F;
 }
 
 * { box-sizing: border-box; }
@@ -648,3 +650,64 @@ fieldset.pf-field legend + * { clear: both; }
 .tr-table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
 .tr-table th, .tr-table td { white-space: nowrap; text-align: left; padding: 6px 10px 6px 0; border-bottom: 1px solid var(--line); }
 .tr-table thead th { font-size: 12px; color: var(--ink-soft); font-weight: 500; }
+
+/* ---------- Schermata iniziale (js/boot.js, index.html #splash) ----------
+   Stessi token del resto dell'app (colori, caratteri), nessuna regola grafica
+   propria. Motion: comparsa in 450 ms al massimo (logo 300 ms, nome +90 ms,
+   frase +150 ms, firma +230 ms), uscita in dissolvenza 260 ms. */
+.splash { display: none; }
+html.splash-on .splash {
+  position: fixed; inset: 0; z-index: 1000; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  background: var(--bg); color: var(--ink); text-align: center;
+  padding: env(safe-area-inset-top) 24px calc(env(safe-area-inset-bottom) + 28px);
+  opacity: 1; transition: opacity 260ms ease-in;
+  /* Ultima difesa se lo script non la togliesse: sparisce comunque dopo 6 s. */
+  animation: splash-failsafe 1ms linear 6s forwards;
+}
+html.splash-on body { overflow: hidden; }
+html.splash-leaving .splash { opacity: 0; pointer-events: none; }
+.splash-center { display: flex; flex-direction: column; align-items: center; margin-top: auto; }
+.splash-logo { width: min(36vw, 150px); height: auto; display: block; animation: splash-rise 300ms cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+.splash-moon, .splash-star { fill: var(--logo-moon); }
+/* Il nastro scende per ultimo, come un segnalibro che si posa: parte 14 unità
+   più in alto e nascosto, si posa in 200 ms dopo 220 ms (fine a 420 ms, entro
+   i 450 ms della comparsa). Con "riduci movimento" nessuno spostamento. */
+.splash-ribbon { fill: var(--logo-ribbon); animation: splash-ribbon 200ms cubic-bezier(0.3, 0.8, 0.3, 1) 220ms both; }
+@keyframes splash-ribbon { from { opacity: 0; transform: translateY(-14px); } to { opacity: 1; transform: none; } }
+.splash-name { font-size: 34px; font-weight: 500; letter-spacing: -0.01em; line-height: 1.15; margin-top: 22px; animation: splash-up 280ms ease-out 90ms both; }
+.splash-tagline { font-size: 15px; line-height: 1.45; color: var(--ink-soft); margin-top: 10px; max-width: 30ch; text-wrap: balance; animation: splash-up 260ms ease-out 150ms both; }
+.splash-signature { margin-top: auto; padding-top: 32px; font-size: 13px; letter-spacing: 0.02em; color: var(--ink-soft); animation: splash-fade 220ms ease-out 230ms both; }
+@keyframes splash-rise { from { opacity: 0; transform: translateY(8px) scale(0.985); } to { opacity: 1; transform: none; } }
+@keyframes splash-up { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+@keyframes splash-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes splash-failsafe { to { opacity: 0; visibility: hidden; pointer-events: none; } }
+@media (prefers-reduced-motion: reduce) {
+  /* Nessun movimento: solo una dissolvenza breve, senza ritardi. */
+  .splash-logo, .splash-name, .splash-tagline, .splash-signature { animation: splash-fade 120ms ease-out both; }
+  .splash-ribbon { animation: none; }
+  html.splash-on .splash { transition: opacity 120ms ease-in; }
+}
+
+/* ---------- Avatar del Profilo (js/avatars.js) ---------- */
+.avatar { display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; overflow: hidden; flex: none; vertical-align: middle; box-shadow: 0 0 0 1px var(--line); }
+.avatar svg { display: block; width: 100%; height: 100%; }
+.avatar-initial { background: var(--accent-soft); color: var(--accent); font-family: 'Fraunces', Georgia, serif; font-weight: 500; line-height: 1; }
+.avatar-empty svg { width: 46%; height: 46%; }
+#profile-btn .avatar { box-shadow: 0 0 0 1.5px var(--line); }
+#profile-btn.active .avatar { box-shadow: 0 0 0 2px var(--accent); }
+.pf-head { display: flex; align-items: center; gap: 16px; margin: 4px 0 8px; }
+.pf-head-text { min-width: 0; display: flex; flex-direction: column; align-items: flex-start; }
+.pf-head-text .profile-name, .pf-head-text #profile-summary { margin: 0 0 2px; }
+.avatar-picker { border-top: 1px solid var(--line); margin-top: 10px; padding-top: 12px; }
+.avatar-picker-title { font-weight: 600; margin-bottom: 10px; }
+.avatar-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(64px, 1fr)); gap: 10px; justify-items: center; }
+.avatar-opt { width: 64px; height: 64px; border-radius: 50%; border: 0; padding: 0; background: none; display: flex; align-items: center; justify-content: center; cursor: pointer; }
+.avatar-opt[aria-pressed="true"] { box-shadow: 0 0 0 3px var(--surface), 0 0 0 5px var(--accent); }
+.avatar-opt:focus-visible, .swatch:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+.avatar-variants { margin-top: 12px; }
+fieldset.avatar-var { border: 0; margin: 0; padding: 8px 0; min-width: 0; }
+.avatar-var legend { font-size: 15px; padding: 0; margin-bottom: 6px; }
+.swatches { display: flex; flex-wrap: wrap; gap: 8px; }
+.swatch { width: 44px; height: 44px; border-radius: 50%; border: 0; padding: 0; background: none; display: flex; align-items: center; justify-content: center; cursor: pointer; }
+.swatch span { width: 30px; height: 30px; border-radius: 50%; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.18), 0 0 0 1px var(--control-line); }
+.swatch[aria-pressed="true"] span { box-shadow: 0 0 0 3px var(--surface), 0 0 0 5px var(--accent); }
