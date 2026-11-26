@@ -16,7 +16,7 @@ import { SOURCES, LINKS, STATUS, SUMMARY, BIBLIOGRAPHY_SOURCE } from './bibliogr
 // personalizzazione e contestualizzazione, mai letti da analisi, backup
 // delle notti o CSV. Interfaccia in ui-profile.js.
 import { sriHTML, trendSectionHTML } from './ui-trends.js';
-import { initContext, renderProfile as renderProfileScreen, contextGreetingName, contextBirthday, nightContextHTML, contextTrendHTML } from './ui-profile.js';
+import { initContext, renderProfile as renderProfileScreen, contextGreetingName, contextBirthday, contextProfile, avatarBadgeHTML, nightContextHTML, contextTrendHTML } from './ui-profile.js';
 import {
   FIELD_LABELS, PROVENANCE_GROUPS, PROVENANCE_LABELS, SCREEN_STATUS_LABELS, MANUAL_MAX_DAYS_BEFORE,
   provenanceSummary, fieldsOfGroups, planProvenance, planScreenDate, manualScreenDate, verifyOperation,
@@ -127,6 +127,14 @@ function readTimePref(key, fallback) {
 const root = document.getElementById('app');
 applyTheme(state.theme);
 
+// Primo disegno completato (diario, migrazione o errore di lettura): la
+// schermata iniziale (js/boot.js) può chiudersi. Una sola volta per avvio.
+function signalReady() {
+  if (window.__sslReady) return;
+  window.__sslReady = true;
+  document.dispatchEvent(new Event('ssl:ready'));
+}
+
 async function init() {
   window.__sslBooted = true; // vedi controllo di avvio in index.html
   // Prima di aprire il database alla versione attuale si controlla se
@@ -138,6 +146,7 @@ async function init() {
       state.migration = { fromVersion: info.version, before: info.records, step: 'backup', backupOk: false, saved: false };
       state.loaded = true;
       render();
+      signalReady();
       return;
     }
   } catch (e) {
@@ -157,6 +166,7 @@ async function startApp() {
   if (!state.loadError) restoreDrafts();
   state.selectedDate = defaultNight();
   render();
+  signalReady();
   if (!state.loadError) checkReminder();
   // Archivio del Profilo e del contesto: facoltativo, non blocca il Diario.
   initContext({
@@ -417,7 +427,7 @@ function renderHeader({ profileButton = true } = {}) {
         <p class="date">${greeting}${dateLabel}</p>
       </div>
       <div class="header-actions">
-        ${profileButton ? `<button type="button" class="icon-btn ${onProfile ? 'active' : ''}" id="profile-btn" aria-label="Profilo${name ? ` di ${escapeHTML(name)}` : ''}" ${onProfile ? 'aria-current="page"' : ''}>${ICONS.user}</button>` : ''}
+        ${profileButton ? `<button type="button" class="icon-btn ${onProfile ? 'active' : ''}" id="profile-btn" aria-label="Profilo${name ? ` di ${escapeHTML(name)}` : ''}" ${onProfile ? 'aria-current="page"' : ''}>${avatarBadgeHTML(contextProfile(), { size: 32, fallbackIcon: ICONS.user })}</button>` : ''}
         <button type="button" class="icon-btn" id="theme-toggle" aria-label="Passa al tema ${nextTheme}">${state.theme === 'light' ? ICONS.moon : ICONS.sun}</button>
       </div>
     </header>`;

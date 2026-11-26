@@ -5,6 +5,8 @@
 // Nessun modulo di analisi consolidato (analytics.js, inference.js)
 // importa questo file. Ogni campo è documentato in docs/PROFILE_AND_CONTEXT.md.
 
+import { validateAvatar } from './avatars.js';
+
 // Formato del Profilo nella versione precedente (localStorage `ssl_profile`).
 export const PROFILE_PREF_KEY = 'profile';
 export const LEGACY_PROFILE_VERSION = 1;
@@ -33,13 +35,14 @@ export const CHRONOTYPE_OPTIONS = [
 // periodo (non si inventa una data d'inizio).
 export const LEGACY_SHIFT_OPTIONS = { no: 'No', sometimes: 'A volte', yes: 'Sì, regolarmente' };
 
-export const PROFILE_FIELDS = ['firstName', 'lastName', 'displayName', 'birthDate', 'ageManual', 'sex', 'gender', 'chronotype', 'sleepNeedMin', 'goalAttemptTime', 'goalScreenFreeMin', 'goal', 'notes'];
+// avatar (26/11/2026): immagine del Profilo scelta tra i disegni di avatars.js, oppure null.
+export const PROFILE_FIELDS = ['firstName', 'lastName', 'displayName', 'birthDate', 'ageManual', 'sex', 'gender', 'chronotype', 'sleepNeedMin', 'goalAttemptTime', 'goalScreenFreeMin', 'goal', 'notes', 'avatar'];
 
 export function emptyProfile() {
   return {
     firstName: '', lastName: '', displayName: '', birthDate: '', ageManual: '',
     sex: '', gender: '', chronotype: '', sleepNeedMin: '', goalAttemptTime: '', goalScreenFreeMin: '', goal: '', notes: '',
-    legacy: null,
+    avatar: null, legacy: null,
   };
 }
 
@@ -120,6 +123,9 @@ export function validateProfile(input, todayISO) {
     if (!SCREEN_FREE_GOALS.includes(Number(gs)) || !/^\d+$/.test(gs)) errors.goalScreenFreeMin = 'Scelta non valida.';
     else p.goalScreenFreeMin = Number(gs);
   }
+  const av = validateAvatar(src.avatar);
+  if (av.error) errors.avatar = av.error;
+  else p.avatar = av.avatar;
   // Valori della versione 1 senza date: conservati così come sono.
   if (src.legacy && typeof src.legacy === 'object') {
     const occ = typeof src.legacy.occupation === 'string' ? src.legacy.occupation.trim().slice(0, 80) : '';

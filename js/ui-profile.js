@@ -17,6 +17,7 @@ import {
   buildContextBackup, contextBackupFilename, parseContextBackup, planContextImport,
 } from './context.js';
 import * as DB from './context-db.js';
+import { AVATARS, SKIN_TONES, HAIR_COLORS, avatarDef, isPerson, tonesFor, defaultAvatar, avatarSVG, avatarLabel, initialOf } from './avatars.js';
 import { nightContext, contextHighlights, goalSuggestions } from './personalize.js';
 
 const ctx = {
@@ -25,11 +26,25 @@ const ctx = {
   draft: null, errors: {}, msg: null, clearPending: false, busy: false,
   periodForm: null, closeForm: null, deletePending: null, undo: null, periodMsg: null, prefMsg: null,
   importState: null, lastImportUndo: null, legacyRemovePending: false,
+  avatarPicker: false, avatarMsg: null,
 };
 let env = null; // { getPref, removePref, todayISO, onChange }
 
 export const getContextState = () => ctx;
 export function contextGreetingName() { return ctx.status === 'ready' ? greetingName(ctx.profile) : ''; }
+export function contextProfile() { return ctx.status === 'ready' ? ctx.profile : null; }
+export function contextAvatar() { return ctx.status === 'ready' && ctx.profile ? ctx.profile.avatar || null : null; }
+
+// Immagine del Profilo: l'avatar scelto, altrimenti l'iniziale del nome,
+// altrimenti l'icona passata da chi chiama. size in px; label: testo
+// alternativo (vuoto = decorativa).
+export function avatarBadgeHTML(profile, { size = 32, label = '', fallbackIcon = '' } = {}) {
+  const av = profile && profile.avatar;
+  if (av) return `<span class="avatar" style="width:${size}px;height:${size}px">${avatarSVG(av, { size, label })}</span>`;
+  const ini = initialOf(greetingName(profile));
+  if (ini) return `<span class="avatar avatar-initial" style="width:${size}px;height:${size}px;font-size:${Math.round(size * 0.45)}px"${label ? ` role="img" aria-label="${label.replace(/"/g, '&quot;')}"` : ' aria-hidden="true"'}>${ini.replace(/[&<>]/g, '')}</span>`;
+  return fallbackIcon;
+}
 export function contextBirthday(todayISO) { return ctx.status === 'ready' && ctx.profile ? isBirthday(ctx.profile.birthDate, todayISO) : false; }
 
 function applyLoaded(r) {
@@ -143,7 +158,14 @@ export function renderProfile(d) {
   tabContent().innerHTML = `
     <section class="card card-pad" aria-labelledby="profile-title">
       <h2 class="settings-title" id="profile-title">Profilo</h2>
-      ${summary}
+      <div class="pf-head">
+        <div class="pf-head-avatar" id="profile-avatar">${avatarBadgeHTML(ctx.profile, { size: 88, label: ctx.profile && ctx.profile.avatar ? `Immagine del profilo: ${avatarLabel(ctx.profile.avatar)}` : '', fallbackIcon: `<span class="avatar avatar-initial avatar-empty" style="width:88px;height:88px" aria-hidden="true">${ICONS.user}</span>` })}</div>
+        <div class="pf-head-text">
+          ${summary}
+          ${ctx.profileUnreadable ? '' : `<button type="button" class="btn-ghost" id="avatar-toggle" aria-expanded="${ctx.avatarPicker}" aria-controls="avatar-picker">${ctx.avatarPicker ? 'Chiudi la scelta' : 'Cambia immagine'}</button>`}
+        </div>
+      </div>
+      ${ctx.avatarPicker && !ctx.profileUnreadable ? avatarPickerHTML(d) : ''}
       <p class="muted small" id="profile-scope">Serve a personalizzare l'app e a dare un contesto alle tue notti. Resta su questo dispositivo, in un archivio separato dal diario; non cambia i dati delle notti, le statistiche né le tre domande su schermo e sonno. Tutti i campi sono facoltativi.</p>
       ${migrationNoticeHTML(msgHTML, esc)}
       ${ctx.profileUnreadable ? msgHTML('Il profilo salvato è stato scritto da una versione più recente dell\'app e non viene letto né modificato da questa versione.', 'warn', 'profile-unreadable') : ''}
@@ -182,6 +204,48 @@ export function renderProfile(d) {
     ${dangerSectionHTML(d)}
   `;
   attachProfileListeners(d);
+}
+
+function avatarPickerHTML(d) {
+  const esc = d.escapeHTML;
+  const cur = (ctx.profile && ctx.profile.avatar) || null;
+  const ini = initialOf(greetingName(ctx.profile));
+  const opt = (id, inner, label) => {
+    const on = id === '' ? !cur : !!cur && cur.id === id;
+    return `<button type="button" class="avatar-opt" data-avatar-pick="${id}" aria-pressed="${on}" aria-label="${esc(label)}">${inner}</button>`;
+  };
+  const options = [
+    opt('', `<span class="avatar avatar-initial" style="width:56px;height:56px;font-size:24px" aria-hidden="true">${ini ? esc(ini) : d.ICONS.user}</span>`, ini ? `Nessuna immagine: iniziale ${ini}` : 'Nessuna immagine'),
+    ...AVATARS.map((a) => {
+      const v = cur && cur.id === a.id ? cur : defaultAvatar(a.id);
+      return opt(a.id, `<span class="avatar" style="width:56px;height:56px">${avatarSVG(v, { size: 56 })}</span>`, a.label + (a.note ? ` (${a.note})` : ''));
+    }),
+  ].join('');
+  let variants = '';
+  if (cur) {
+    const def = avatarDef(cur.id);
+    const tones = tonesFor(cur.id);
+    const sw = (attr, list, curId, title, colorOf) => `
+      <fieldset class="avatar-var"><legend>${title}</legend><div class="swatches">
+        ${list.map((t) => `<button type="button" class="swatch" ${attr}="${t.id}" aria-pressed="${t.id === curId}" aria-label="${esc(t.label)}" title="${esc(t.label)}"><span style="background:${colorOf(t)}"></span></button>`).join('')}
+      </div></fieldset>`;
+    if (def.kind === 'person') {
+      variants += sw('data-avatar-tone', SKIN_TONES, cur.tone, 'Carnagione', (t) => t.skin);
+      variants += sw('data-avatar-hair', HAIR_COLORS, cur.hair, 'Capelli', (t) => t.color);
+    } else if (tones.length > 1) {
+      variants += sw('data-avatar-tone', tones, cur.tone, 'Colore', (t) => t.a);
+    }
+    variants += `<label class="check-row"><input type="checkbox" id="avatar-glasses" ${cur.glasses ? 'checked' : ''}><span>Occhiali</span></label>`;
+  }
+  const m = ctx.avatarMsg ? d.msgHTML(esc(ctx.avatarMsg.text), ctx.avatarMsg.type, 'avatar-msg') : '';
+  return `
+    <div class="avatar-picker" id="avatar-picker" role="group" aria-labelledby="avatar-picker-title">
+      <p class="avatar-picker-title" id="avatar-picker-title">Scegli un'immagine</p>
+      <div class="avatar-grid">${options}</div>
+      ${variants ? `<div class="avatar-variants">${variants}</div>` : ''}
+      <p class="muted small">Disegni inclusi nell'app: nessuna foto, nulla esce dal telefono. Ogni scelta si salva subito.</p>
+      <div aria-live="polite">${m}</div>
+    </div>`;
 }
 
 function migrationNoticeHTML(msgHTML, esc) {
@@ -372,6 +436,49 @@ function attachProfileListeners(d) {
   const { root } = d;
   const rerender = () => renderProfile(d);
   const keepFocus = (sel) => { const el = root.querySelector(sel); if (el) el.focus({ preventScroll: true }); };
+  // Immagine del Profilo: ogni scelta si salva subito (solo l'immagine:
+  // eventuali modifiche non salvate agli altri campi restano nel modulo).
+  const avToggle = root.querySelector('#avatar-toggle');
+  if (avToggle) avToggle.addEventListener('click', () => { ctx.avatarPicker = !ctx.avatarPicker; ctx.avatarMsg = null; rerender(); keepFocus(ctx.avatarPicker ? '#avatar-picker [aria-pressed="true"]' : '#avatar-toggle'); });
+  const saveAvatar = async (next, focusSel) => {
+    if (ctx.busy) return; // doppio tocco: ignorato
+    const base = ctx.profile || emptyProfile();
+    const { profile, errors } = validateProfile({ ...base, avatar: next }, d.todayISO());
+    if (errors.avatar) { ctx.avatarMsg = { type: 'error', text: errors.avatar }; rerender(); return; }
+    ctx.busy = true;
+    const r = await DB.saveProfile(profile);
+    ctx.busy = false;
+    if (r.ok) {
+      ctx.profile = profile;
+      if (ctx.draft) ctx.draft = { ...ctx.draft, avatar: next };
+      ctx.avatarMsg = { type: 'info', text: next ? `Immagine salvata: ${avatarLabel(next)}.` : 'Immagine tolta: si vede l\'iniziale del nome.' };
+      d.render();
+    } else {
+      ctx.avatarMsg = { type: 'error', text: `Immagine NON salvata: ${reasonText(r.reason)}.` };
+      rerender();
+    }
+    keepFocus(focusSel);
+  };
+  root.querySelectorAll('[data-avatar-pick]').forEach((b) => b.addEventListener('click', () => {
+    const id = b.dataset.avatarPick;
+    const cur = (ctx.profile && ctx.profile.avatar) || null;
+    if (id === '') { saveAvatar(null, '[data-avatar-pick=""]'); return; }
+    if (cur && cur.id === id) return;
+    saveAvatar(defaultAvatar(id), `[data-avatar-pick="${id}"]`);
+  }));
+  root.querySelectorAll('[data-avatar-tone]').forEach((b) => b.addEventListener('click', () => {
+    const cur = ctx.profile && ctx.profile.avatar; if (!cur) return;
+    saveAvatar({ ...cur, tone: b.dataset.avatarTone }, `[data-avatar-tone="${b.dataset.avatarTone}"]`);
+  }));
+  root.querySelectorAll('[data-avatar-hair]').forEach((b) => b.addEventListener('click', () => {
+    const cur = ctx.profile && ctx.profile.avatar; if (!cur) return;
+    saveAvatar({ ...cur, hair: b.dataset.avatarHair }, `[data-avatar-hair="${b.dataset.avatarHair}"]`);
+  }));
+  const gl = root.querySelector('#avatar-glasses');
+  if (gl) gl.addEventListener('change', () => {
+    const cur = ctx.profile && ctx.profile.avatar; if (!cur) return;
+    saveAvatar({ ...cur, glasses: gl.checked }, '#avatar-glasses');
+  });
   const form = root.querySelector('#profile-form');
   if (form) {
     const values = () => {
