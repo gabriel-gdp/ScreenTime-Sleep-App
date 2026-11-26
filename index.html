@@ -20,8 +20,37 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="Sonno & Schermo" />
   <link rel="stylesheet" href="css/styles.css" />
+  <!-- Caratteri della schermata iniziale: richiesti subito, dalla cartella dell'app. -->
+  <link rel="preload" href="fonts/fraunces-latin-500-normal.woff2" as="font" type="font/woff2" crossorigin />
+  <link rel="preload" href="fonts/inter-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin />
+  <!-- Tema e schermata iniziale prima del primo disegno (vedi js/boot.js). -->
+  <script src="js/boot.js"></script>
 </head>
 <body>
+  <!-- Schermata iniziale: solo decorativa (aria-hidden), visibile solo con
+       html.splash-on (js/boot.js), rimossa quando l'app è pronta. -->
+  <div id="splash" class="splash" aria-hidden="true">
+    <div class="splash-center">
+      <!-- Logo A1 (falce di pagine con nastro segnalibro) in linea: colori dai
+           token del tema (--logo-moon, --logo-ribbon); le righe delle pagine
+           sono tagli della maschera, quindi funzionano su qualsiasi fondo. -->
+      <svg class="splash-logo" viewBox="22 22 156 174" width="138" height="154" aria-hidden="true" focusable="false">
+        <defs>
+          <mask id="splash-moon" maskUnits="userSpaceOnUse" x="0" y="0" width="200" height="200">
+            <circle cx="100" cy="100" r="70" fill="#fff" />
+            <circle cx="127" cy="83" r="57" fill="#000" />
+            <g fill="none" stroke="#000" stroke-width="3.2"><circle cx="100" cy="100" r="61" /><circle cx="100" cy="100" r="52" /><circle cx="100" cy="100" r="43" /></g>
+          </mask>
+        </defs>
+        <path class="splash-ribbon" d="M80 150 v42 l8 -7 l8 7 v-42 z" />
+        <circle class="splash-moon" cx="100" cy="100" r="70" mask="url(#splash-moon)" />
+        <path class="splash-star" d="M150 58 l4 11 l11 4 l-11 4 l-4 11 l-4 -11 l-11 -4 l11 -4 z" />
+      </svg>
+      <p class="splash-name serif">Diario del sonno</p>
+      <p class="splash-tagline">Osservare le notti, conoscere il proprio ritmo.</p>
+    </div>
+    <p class="splash-signature">Un progetto di Gabriel</p>
+  </div>
   <div id="app"><p class="muted" style="padding:24px;">Caricamento…</p></div>
   <script type="module" src="js/app.js"></script>
   <script>

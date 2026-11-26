@@ -85,6 +85,8 @@ In evoluzione secondo la roadmap approvata il 17/11/2026 (`docs/research/IMPLEME
   - spunti legati agli obiettivi.
 
   Non cambiano le notti, le statistiche né P1–P3. Dettagli: `docs/PROFILE_AND_CONTEXT.md`.
+- **Schermata iniziale** (26/11/2026): logo, nome, una frase e la firma "Un progetto di Gabriel". Compare solo all'apertura dell'app (non durante la navigazione né dopo un aggiornamento) e si chiude appena l'app è pronta. Rispetta "riduci movimento" e il tema chiaro o scuro, che ora è applicato prima del primo disegno.
+- **Nuovo logo e avatar** (26/11/2026): logo A1, una luna fatta di pagine con un nastro segnalibro, su icona, schermata iniziale e favicon. Nel Profilo si può scegliere un'immagine fra nove volti disegnati (quattro persone, un alieno, un gufo, un'allodola, un gatto, la luna) con carnagione, capelli, occhiali e colori a scelta; nessuna foto, nulla esce dal telefono.
 - **Analisi descrittive aggiunte** (23/11/2026):
   - SRI da diario nella Regolarità;
   - "Andamento di una misura", con media mobile a 7 notti, pendenza di Theil–Sen, notti molto diverse dal solito (MAD, solo visive) e confronto con la variabilità abituale;
@@ -110,4 +112,4 @@ npm test               # test della logica + test nel browser
 npm run test:unit      # solo logica, basta Node 18+ (nessuna installazione)
 ```
 
-Stato al 23/11/2026: 31 suite, 1.151 controlli superati (Chromium). Strategia e livelli dei test: `docs/TEST_STRATEGY.md`. Report del rilascio: `docs/FINAL_RELEASE_REPORT.md`.
+Stato al 26/11/2026: 32 suite, 1.176 controlli superati (Chromium). Strategia e livelli dei test: `docs/TEST_STRATEGY.md`. Report del rilascio: `docs/FINAL_RELEASE_REPORT.md`.
